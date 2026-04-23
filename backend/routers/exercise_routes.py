@@ -1,0 +1,138 @@
+from datetime import datetime, timedelta, timezone
+import logging
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+
+import models
+from auth import get_current_user
+from database import get_db
+
+router = APIRouter(prefix="/api/exercise", tags=["exercise"])
+log = logging.getLogger("compass.app")
+
+
+class ExerciseLogRequest(BaseModel):
+    exercise_type: str
+    duration_min: int
+    calories_burned: int
+    notes: Optional[str] = None
+    date: Optional[str] = None
+
+
+@router.post("/log")
+def log_exercise(
+    body: ExerciseLogRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    date = body.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    entry = models.ExerciseLog(
+        user_id=current_user.id,
+        date=date,
+        exercise_type=body.exercise_type,
+        duration_min=body.duration_min,
+        calories_burned=body.calories_burned,
+        notes=body.notes,
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    log.info(
+        "exercise logged",
+        extra={
+            "event": "exercise_logged",
+            "domain": "exercise",
+            "log_id": entry.id,
+            "date": date,
+            "exercise_type": (body.exercise_type or "")[:64],
+            "duration_min": body.duration_min,
+            "calories_burned": body.calories_burned,
+            "has_notes": bool(body.notes),
+        },
+    )
+    return {"id": entry.id, "message": "Exercise logged"}
+
+
+@router.delete("/log/{log_id}")
+def delete_exercise_log(
+    log_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    entry = db.query(models.ExerciseLog).filter(
+        models.ExerciseLog.id == log_id, models.ExerciseLog.user_id == current_user.id
+    ).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Log not found")
+    log.info(
+        "exercise log deleted",
+        extra={
+            "event": "exercise_log_deleted",
+            "domain": "exercise",
+            "log_id": entry.id,
+            "date": entry.date,
+            "exercise_type": (entry.exercise_type or "")[:64],
+            "duration_min": entry.duration_min,
+            "calories_burned": entry.calories_burned,
+        },
+    )
+    db.delete(entry)
+    db.commit()
+    return {"message": "Deleted"}
+
+
+@router.get("/today")
+def get_exercise_today(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    logs = (
+        db.query(models.ExerciseLog)
+        .filter(models.ExerciseLog.user_id == current_user.id, models.ExerciseLog.date == today)
+        .order_by(models.ExerciseLog.logged_at)
+        .all()
+    )
+    return {
+        "logs": [
+            {
+                "id": l.id,
+                "exercise_type": l.exercise_type,
+                "duration_min": l.duration_min,
+                "calories_burned": l.calories_burned,
+                "notes": l.notes,
+                "logged_at": l.logged_at.isoformat(),
+            }
+            for l in logs
+        ],
+        "total_calories": sum(l.calories_burned for l in logs),
+        "total_minutes": sum(l.duration_min for l in logs),
+    }
+
+
+@router.get("/history")
+def get_exercise_history(
+    days: int = 7,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    today = datetime.now(timezone.utc)
+    result = []
+    for i in range(days - 1, -1, -1):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        logs = (
+            db.query(models.ExerciseLog)
+            .filter(models.ExerciseLog.user_id == current_user.id, models.ExerciseLog.date == d)
+            .all()
+        )
+        result.append({
+            "date": d,
+            "total_calories": sum(l.calories_burned for l in logs),
+            "total_minutes": sum(l.duration_min for l in logs),
+            "sessions": len(logs),
+        })
+    return result

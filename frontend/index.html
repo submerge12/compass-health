@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="app.name">Compass Health</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,500;9..144,600&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+  <div id="view-auth" class="view">
+    <div id="auth-container"></div>
+  </div>
+
+  <div id="view-bmr" class="view hidden">
+    <div id="bmr-container"></div>
+  </div>
+
+  <div id="view-preferences" class="view hidden">
+    <div id="preferences-container"></div>
+  </div>
+
+  <div id="view-main" class="view hidden">
+    <header id="nav">
+      <div class="app-shell-bar">
+        <button type="button"
+                class="app-brand"
+                data-app-nav
+                data-nav-link
+                data-page="dashboard"
+                data-nav-key="dashboard">
+          <span class="app-brand-mark" aria-hidden="true">
+            <span class="app-brand-leaf"></span>
+          </span>
+          <span class="app-brand-copy">
+            <strong data-i18n="app.name">Compass Health</strong>
+            <small data-i18n="app.tagline">Healthy living, starting today</small>
+          </span>
+        </button>
+
+        <nav class="app-nav-links" aria-label="Primary">
+          <a href="#"
+             class="app-nav-link active"
+             data-app-nav
+             data-nav-link
+             data-page="dashboard"
+             data-nav-key="dashboard">
+            <span data-i18n="home.nav_home">Home</span>
+          </a>
+          <a href="#"
+             class="app-nav-link"
+             data-app-nav
+             data-nav-link
+             data-page="plan"
+             data-plan-tab="meal_plan"
+             data-nav-key="plan-meal">
+            <span data-i18n="home.nav_menu">Meal Builder</span>
+          </a>
+          <a href="#"
+             class="app-nav-link"
+             data-app-nav
+             data-nav-link
+             data-page="plan"
+             data-plan-tab="procurement"
+             data-nav-key="plan-procurement">
+            <span data-i18n="home.nav_procurement">Procurement</span>
+          </a>
+          <a href="#"
+             class="app-nav-link"
+             data-app-nav
+             data-nav-link
+             data-page="diet"
+             data-diet-tab="recipes"
+             data-nav-key="diet-recipes">
+            <span data-i18n="home.nav_library">Recipe Library</span>
+          </a>
+          <a href="#"
+             class="app-nav-link"
+             data-app-nav
+             data-nav-link
+             data-page="settings"
+             data-nav-key="settings">
+            <span data-i18n="home.nav_profile">Profile</span>
+          </a>
+        </nav>
+
+        <div class="app-nav-actions">
+          <button id="lang-toggle" type="button" class="btn btn-ghost btn-sm lang-btn">EN / 中</button>
+          <button id="logout-btn" type="button" class="btn btn-ghost btn-sm logout-btn" data-i18n="nav.logout">Log Out</button>
+          <button type="button"
+                  class="btn btn-primary btn-sm app-start-btn"
+                  data-app-nav
+                  data-page="plan"
+                  data-plan-tab="meal_plan"
+                  data-nav-key="plan-meal">
+            <span data-i18n="home.start_now">Start Now</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="app-top-utility">
+        <div class="app-utility-meta">
+          <div class="app-user-pill">
+            <span class="app-user-label" data-i18n="home.user_label">Current user</span>
+            <strong id="nav-username"></strong>
+            <span id="nav-membership-badge" class="badge"></span>
+          </div>
+          <div class="app-date-pill">
+            <span id="nav-weekday"></span>
+            <span id="nav-monthyear"></span>
+            <span id="nav-datenum"></span>
+          </div>
+        </div>
+
+        <nav class="app-quick-links" aria-label="Shortcuts">
+          <a href="#"
+             class="app-quick-link"
+             data-app-nav
+             data-nav-link
+             data-page="water"
+             data-nav-key="water">
+            <span data-i18n="nav.water">Water</span>
+          </a>
+          <a href="#"
+             class="app-quick-link"
+             data-app-nav
+             data-nav-link
+             data-page="exercise"
+             data-nav-key="exercise">
+            <span data-i18n="nav.exercise">Exercise</span>
+          </a>
+          <a href="#"
+             class="app-quick-link"
+             data-app-nav
+             data-nav-link
+             data-page="condition"
+             data-nav-key="condition">
+            <span data-i18n="nav.condition">Condition</span>
+          </a>
+          <a href="#"
+             class="app-quick-link"
+             data-app-nav
+             data-nav-link
+             data-page="stats"
+             data-nav-key="stats">
+            <span data-i18n="nav.stats">Stats</span>
+          </a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <div id="page-dashboard" class="page active"></div>
+      <div id="page-water" class="page"></div>
+      <div id="page-exercise" class="page"></div>
+      <div id="page-diet" class="page"></div>
+      <div id="page-plan" class="page"></div>
+      <div id="page-condition" class="page"></div>
+      <div id="page-stats" class="page"></div>
+      <div id="page-settings" class="page"></div>
+    </main>
+  </div>
+
+  <div id="view-admin" class="view hidden">
+    <aside id="admin-nav">
+      <div class="nav-logo">
+        <h1 data-i18n="admin.portal_title">Admin Console</h1>
+        <small data-i18n="admin.portal_tagline">Administrator view</small>
+      </div>
+
+      <div class="nav-user">
+        <span id="admin-username"></span>
+        <span class="badge badge-admin" data-i18n="admin.role_badge">Admin</span>
+      </div>
+
+      <nav>
+        <a href="#" data-admin-page="dashboard" class="active">
+          <span class="ico">O</span>
+          <span data-i18n="admin.nav_dashboard">Dashboard</span>
+        </a>
+        <a href="#" data-admin-page="reports">
+          <span class="ico">R</span>
+          <span data-i18n="admin.nav_reports">Reports</span>
+        </a>
+        <a href="#" data-admin-page="recipes">
+          <span class="ico">P</span>
+          <span data-i18n="admin.nav_recipes">Recipes</span>
+        </a>
+        <a href="#" data-admin-page="users">
+          <span class="ico">U</span>
+          <span data-i18n="admin.nav_users">Users</span>
+        </a>
+      </nav>
+
+      <div class="nav-spacer"></div>
+
+      <button id="admin-lang-toggle" type="button" class="btn btn-ghost btn-sm lang-btn">EN / 中</button>
+      <button id="admin-logout-btn" type="button" class="btn btn-ghost btn-sm logout-btn" data-i18n="nav.logout">Log Out</button>
+    </aside>
+
+    <main id="admin-main">
+      <div id="admin-page-dashboard" class="page active"></div>
+      <div id="admin-page-reports" class="page"></div>
+      <div id="admin-page-recipes" class="page"></div>
+      <div id="admin-page-users" class="page"></div>
+    </main>
+  </div>
+
+  <div id="toast-container"></div>
+
+  <div id="modal-overlay" class="hidden">
+    <div id="modal-box">
+      <div id="modal-title"></div>
+      <div id="modal-content"></div>
+      <div id="modal-footer"></div>
+    </div>
+  </div>
+
+  <script src="js/i18n.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/pages/auth.js"></script>
+  <script src="js/pages/bmr.js"></script>
+  <script src="js/pages/preferences.js"></script>
+  <script src="js/pages/dashboard.js"></script>
+  <script src="js/pages/water.js"></script>
+  <script src="js/pages/exercise.js"></script>
+  <script src="js/pages/diet.js"></script>
+  <script src="js/pages/meal_engine.js"></script>
+  <script src="js/pages/condition.js"></script>
+  <script src="js/pages/stats.js"></script>
+  <script src="js/pages/settings.js"></script>
+  <script src="js/pages/admin.js"></script>
+  <script src="js/app.js"></script>
+
+</body>
+</html>

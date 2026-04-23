@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Env / DB
+backend/.env
+backend/compass.db
+
+# Logs / backups
+backend/logs/
+backups/
+
+# Local tooling / workspace metadata
+.claude/
+CLAUDE.md
+CLAUDE.txt
+
+# OS
+.DS_Store
+Thumbs.db

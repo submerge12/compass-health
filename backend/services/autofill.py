@@ -1,7 +1,7 @@
 """
 Midnight auto-fill worker.
 
-Runs at 00:00 UTC and, for any user whose previous-day meal plan was not
+Runs at the configured scheduler time and, for any user whose previous-day meal plan was not
 confirmed, copies each breakfast/lunch/dinner entry into DietLog — but only
 for slots that the user did not already fill manually.
 
@@ -14,12 +14,13 @@ from sqlalchemy.orm import Session
 
 import models
 from database import SessionLocal
+from services import local_dates, planning_context as pc
 
 MEAL_TYPES = ("breakfast", "lunch", "dinner")
 
 
-def _yesterday_utc_str() -> str:
-    return (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+def _yesterday_local_str() -> str:
+    return (local_dates.app_now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def build_diet_log_from_entry(entry: models.MealPlanEntry) -> models.DietLog:
@@ -79,9 +80,11 @@ def run_autofill_for_date(db: Session, date_str: str) -> dict:
             .first()
         )
         if existing_log:
+            pc.mark_plan_slot_recorded(db, entry.user_id, entry.date, entry.meal_type)
             skipped_logged += 1
             continue
         db.add(build_diet_log_from_entry(entry))
+        pc.mark_plan_slot_recorded(db, entry.user_id, entry.date, entry.meal_type)
         filled_count += 1
 
     db.commit()
@@ -97,6 +100,6 @@ def run_midnight_autofill() -> dict:
     """Entry point used by the scheduler. Opens its own DB session."""
     db = SessionLocal()
     try:
-        return run_autofill_for_date(db, _yesterday_utc_str())
+        return run_autofill_for_date(db, _yesterday_local_str())
     finally:
         db.close()

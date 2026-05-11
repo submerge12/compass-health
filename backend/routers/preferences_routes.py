@@ -11,14 +11,14 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 import models
 from auth import get_current_user
 from database import get_db
-from services import deepseek
+from services import deepseek, llm_quota
 
 router = APIRouter(prefix="/api/preferences", tags=["preferences"])
 app_log = logging.getLogger("compass.app")
@@ -56,25 +56,36 @@ CATEGORIES = set(CATEGORY_ITEMS.keys())
 # ── Request / response schemas ───────────────────────────────────────────────
 
 class PreferenceItem(BaseModel):
-    category: str
-    item_key: str
+    category: str = Field(..., min_length=1, max_length=50)
+    item_key: str = Field(..., min_length=1, max_length=80)
 
 
 class CustomEntry(BaseModel):
-    category: str           # the category bucket to classify into (usually "vegetables")
-    hint: Optional[str] = None   # optional sub-category hint: "leafy_greens", "mushrooms", ...
-    text: str               # user's free-form text
+    category: str = Field(..., min_length=1, max_length=50)           # the category bucket to classify into (usually "vegetables")
+    hint: Optional[str] = Field(default=None, max_length=80)   # optional sub-category hint: "leafy_greens", "mushrooms", ...
+    text: str = Field(..., min_length=1, max_length=1000)               # user's free-form text
 
 
 class PreferenceUpsert(BaseModel):
-    items: list[PreferenceItem] = []
-    custom: list[CustomEntry] = []
+    items: list[PreferenceItem] = Field(default_factory=list, max_length=200)
+    custom: list[CustomEntry] = Field(default_factory=list, max_length=20)
     replace: bool = False   # when true, wipe existing prefs before inserting
 
 
 # ── Classifier ───────────────────────────────────────────────────────────────
 
-def classify_custom_text(entry: CustomEntry) -> list[str]:
+def _refund_preference_quota(db: Session, user_id: int, call_log_id: Optional[int]) -> None:
+    if call_log_id is None:
+        return
+    llm_quota.refund_call(
+        db,
+        call_log_id,
+        user_id=user_id,
+        kind=llm_quota.PREFERENCE_CLASSIFY,
+    )
+
+
+def classify_custom_text(entry: CustomEntry, db: Session, user_id: int) -> list[str]:
     """Map free-form user text to a list of canonical item slugs."""
     if entry.category not in CATEGORIES:
         raise HTTPException(
@@ -114,8 +125,26 @@ Return ONLY valid JSON: {{"items": ["slug1", "slug2"]}}.
 
     user_prompt = f"{hint_line}Free text:\n{entry.text}"
 
-    client = deepseek.get_client()
+    quota_call_id: Optional[int] = None
     try:
+        quota_usage = llm_quota.check_and_consume(db, user_id, llm_quota.PREFERENCE_CLASSIFY)
+    except llm_quota.LLMQuotaExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "quota_exhausted",
+                "kind": llm_quota.PREFERENCE_CLASSIFY,
+                "message_zh": "本周 AI 食材识别次数已用完，请先从列表中选择或稍后再试。",
+                "message_en": "AI preference-classification quota is exhausted for this week.",
+                "next_refresh_at": exc.next_refresh_at.isoformat()
+                if getattr(exc, "next_refresh_at", None) else None,
+            },
+        )
+    else:
+        quota_call_id = quota_usage.get("call_log_id")
+
+    try:
+        client = deepseek.get_client()
         resp = client.chat.completions.create(
             model=deepseek.DEEPSEEK_CHAT_MODEL,
             messages=[
@@ -145,6 +174,7 @@ Return ONLY valid JSON: {{"items": ["slug1", "slug2"]}}.
         )
         return slugs
     except json.JSONDecodeError:
+        _refund_preference_quota(db, user_id, quota_call_id)
         llm_log.warning(
             "preference classification returned invalid json",
             extra={
@@ -154,8 +184,9 @@ Return ONLY valid JSON: {{"items": ["slug1", "slug2"]}}.
                 "hint": entry.hint or "",
             },
         )
-        raise HTTPException(status_code=500, detail="DeepSeek returned invalid JSON")
+        raise HTTPException(status_code=502, detail="Preference classification returned invalid JSON")
     except Exception as e:
+        _refund_preference_quota(db, user_id, quota_call_id)
         llm_log.exception(
             "preference classification failed",
             extra={
@@ -167,8 +198,8 @@ Return ONLY valid JSON: {{"items": ["slug1", "slug2"]}}.
             },
         )
         raise HTTPException(
-            status_code=500,
-            detail=f"Preference classification failed: {e}",
+            status_code=502,
+            detail="Preference classification failed",
         )
 
 
@@ -229,7 +260,7 @@ def upsert_preferences(
         to_insert.append((item.category, key))
 
     for entry in body.custom:
-        slugs = classify_custom_text(entry)
+        slugs = classify_custom_text(entry, db, current_user.id)
         classified[entry.text] = slugs
         for s in slugs:
             to_insert.append((entry.category, s))

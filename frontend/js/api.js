@@ -81,8 +81,11 @@ const API = {
         localStorage.removeItem('ch_access_token');
         localStorage.removeItem('ch_refresh_token');
         localStorage.removeItem('ch_has_bmr');
-        window.location.reload();
-        throw new Error('Session expired. Please log in again.');
+        localStorage.removeItem('ch_is_admin');
+        const wrapped = new Error('Session expired. Please log in again.');
+        wrapped.status = 401;
+        wrapped.error = 'session_expired';
+        throw wrapped;
       }
     }
 
@@ -191,6 +194,10 @@ const API = {
     return this._request('PATCH', '/api/users/me/weight', { weight_kg });
   },
 
+  async updateActivityLevel(activity_level) {
+    return this._request('PATCH', '/api/users/me/activity-level', { activity_level });
+  },
+
   async getFoodPreferences() {
     return this._request('GET', '/api/preferences/food');
   },
@@ -273,6 +280,10 @@ const API = {
     return this._request('DELETE', `/api/diet/log/${id}`);
   },
 
+  async reanalyzeDietLog(id) {
+    return this._request('POST', `/api/diet/log/${id}/reanalyze`, {});
+  },
+
   async getDietToday() {
     return this._request('GET', '/api/diet/today');
   },
@@ -342,12 +353,18 @@ const API = {
     return this._request('DELETE', `/api/meal-plan/entry/${id}`);
   },
 
-  async getMealPlanPool() {
-    return this._request('GET', '/api/meal-plan/pool');
+  async getMealPlanPool(variant = 0) {
+    const query = Number.isFinite(Number(variant)) ? `?variant=${encodeURIComponent(Number(variant))}` : '';
+    return this._request('GET', `/api/meal-plan/pool${query}`);
   },
 
-  async nameMealPlanPool() {
-    return this._request('POST', '/api/meal-plan/pool/name', {});
+  async nameMealPlanPool(variant = 0) {
+    const query = Number.isFinite(Number(variant)) ? `?variant=${encodeURIComponent(Number(variant))}` : '';
+    return this._request('POST', `/api/meal-plan/pool/name${query}`, {});
+  },
+
+  async supplementMealPlanPool(body) {
+    return this._request('POST', '/api/meal-plan/pool/supplement', body);
   },
 
   async arrangeMealPlan(body) {
@@ -457,6 +474,40 @@ const API = {
     return this._request('GET', `/api/admin/users/${id}/detail`);
   },
 
+  async adminGetUserPreferences(id) {
+    return this._request('GET', `/api/admin/users/${id}/preferences`);
+  },
+
+  async adminUpdateUserPreferences(id, data) {
+    return this._request('PUT', `/api/admin/users/${id}/preferences`, data);
+  },
+
+  async adminGetLLMQuotas(userId = null) {
+    const qs = userId ? `?user_id=${encodeURIComponent(userId)}` : '';
+    return this._request('GET', `/api/admin/llm-quotas${qs}`);
+  },
+
+  async adminResetLLMQuota(id, data) {
+    return this._request('POST', `/api/admin/users/${id}/llm-quota/reset`, data);
+  },
+
+  async adminResetAllLLMQuotas(data) {
+    return this._request('POST', '/api/admin/llm-quotas/reset', data);
+  },
+
+  async adminGetFoodLibrary() {
+    return this._request('GET', '/api/admin/food-library');
+  },
+
+  async adminGetObservabilityEvents({ limit = 80, event = '', userId = '', logger = '' } = {}) {
+    const params = new URLSearchParams();
+    params.set('limit', String(limit));
+    if (event) params.set('event', event);
+    if (userId) params.set('user_id', String(userId));
+    if (logger) params.set('logger', logger);
+    return this._request('GET', `/api/admin/observability/events?${params.toString()}`);
+  },
+
   async adminUpdateUser(id, data) {
     return this._request('PATCH', `/api/admin/users/${id}`, data);
   },
@@ -516,8 +567,15 @@ API._request = async function(method, path, body = null, requiresAuth = true) {
       localStorage.removeItem('ch_access_token');
       localStorage.removeItem('ch_refresh_token');
       localStorage.removeItem('ch_has_bmr');
-      window.location.reload();
-      throw new Error('Session expired. Please log in again.');
+      localStorage.removeItem('ch_is_admin');
+      const wrapped = new Error('Session expired. Please log in again.');
+      wrapped.status = 401;
+      wrapped.error = 'session_expired';
+      wrapped.requestId = context.requestId;
+      wrapped.journeyId = context.journeyId;
+      wrapped.uiAction = context.uiAction;
+      wrapped.path = path;
+      throw wrapped;
     }
   }
 

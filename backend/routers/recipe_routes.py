@@ -2,13 +2,14 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
 import models
 from auth import get_current_user
 from database import get_db
+from services import recipe_access
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
 
@@ -49,15 +50,15 @@ def _extract_keywords(ingredients_text: str) -> list[str]:
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class RecipeCreate(BaseModel):
-    name: str
-    ingredients: Optional[str] = None
-    steps: Optional[str] = None
-    video_url: Optional[str] = None
-    category: Optional[str] = None
+    name: str = Field(..., min_length=1, max_length=120)
+    ingredients: Optional[str] = Field(default=None, max_length=4000)
+    steps: Optional[str] = Field(default=None, max_length=4000)
+    video_url: Optional[str] = Field(default=None, max_length=500)
+    category: Optional[str] = Field(default=None, max_length=80)
 
 
 class IngredientMatchRequest(BaseModel):
-    ingredients: str
+    ingredients: str = Field(..., min_length=1, max_length=4000)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -68,7 +69,12 @@ def list_recipes(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    query = db.query(models.Recipe).filter(models.Recipe.is_approved == True)
+    query = db.query(models.Recipe).filter(
+        or_(
+            models.Recipe.is_approved == True,  # noqa: E712
+            models.Recipe.submitted_by == current_user.id,
+        )
+    )
     if q:
         like = f"%{q}%"
         query = query.filter(
@@ -87,7 +93,7 @@ def get_recipe(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    r = db.query(models.Recipe).filter(models.Recipe.id == recipe_id).first()
+    r = recipe_access.get_visible_recipe(db, recipe_id, current_user.id)
     if not r:
         raise HTTPException(status_code=404, detail="Recipe not found")
     return _recipe_to_dict(r)
@@ -99,15 +105,20 @@ def create_recipe(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    try:
+        video_url = recipe_access.normalize_video_url(body.video_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
     recipe = models.Recipe(
         name=body.name,
         ingredients=body.ingredients,
         steps=body.steps,
-        video_url=body.video_url,
+        video_url=video_url,
         category=body.category,
         is_builtin=False,
         submitted_by=current_user.id,
-        is_approved=True,
+        is_approved=False,
     )
     db.add(recipe)
     db.commit()

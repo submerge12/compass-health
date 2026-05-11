@@ -1,4 +1,5 @@
 from datetime import timezone as _tz
+from contextlib import asynccontextmanager
 
 # Configure logging before anything else imports `logging.getLogger(...)`,
 # so module-level loggers pick up the dictConfig on first use.
@@ -25,12 +26,21 @@ from services import autofill
 import models
 
 log = logging.getLogger("compass.app")
-scheduler = BackgroundScheduler(timezone=_tz.utc)
+scheduler = None
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    on_startup()
+    try:
+        yield
+    finally:
+        on_shutdown()
 
 app = FastAPI(
     title="Compass Health API",
     description="Backend API for Compass Health — a bilingual health tracking app for Chinese immigrants in the US.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
@@ -230,8 +240,8 @@ def run_migrations():
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
-@app.on_event("startup")
 def on_startup():
+    global scheduler
     log.info("compass-health starting up")
     Base.metadata.create_all(bind=engine)
     run_migrations()
@@ -240,6 +250,9 @@ def on_startup():
         seed_builtin_recipes(db)
     finally:
         db.close()
+
+    if scheduler is None:
+        scheduler = BackgroundScheduler(timezone=_tz.utc)
 
     # Auto-fill yesterday's meal-plan slots that the user left empty. Fires at
     # 00:00 UTC; users have the whole previous day up to midnight to confirm.
@@ -256,11 +269,12 @@ def on_startup():
         log.info("scheduler started (midnight_autofill @ 00:00 UTC)")
 
 
-@app.on_event("shutdown")
 def on_shutdown():
+    global scheduler
     log.info("compass-health shutting down")
-    if scheduler.running:
+    if scheduler and scheduler.running:
         scheduler.shutdown(wait=False)
+    scheduler = None
 
 
 @app.get("/")

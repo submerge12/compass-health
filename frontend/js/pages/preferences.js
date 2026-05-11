@@ -25,7 +25,7 @@ const PreferencesPage = {
         if (!this._selected[cat]) this._selected[cat] = new Set();
       }
     } catch (err) {
-      container.innerHTML = `<div class="bmr-card"><div class="empty-state">${I18n.t('common.error')}: ${err.message}</div><div style="display:flex;justify-content:flex-end;margin-top:16px"><button class="btn btn-ghost" id="prefs-skip-err">${I18n.t('prefs.skip')}</button></div></div>`;
+      container.innerHTML = `<div class="bmr-card"><div class="empty-state">${this._esc(I18n.t('common.error'))}: ${this._esc(err.message)}</div><div style="display:flex;justify-content:flex-end;margin-top:16px"><button class="btn btn-ghost" id="prefs-skip-err">${this._esc(I18n.t('prefs.skip'))}</button></div></div>`;
       document.getElementById('prefs-skip-err')?.addEventListener('click', () => App.showView('main'));
       return;
     }
@@ -99,7 +99,7 @@ const PreferencesPage = {
 
   _esc(s) {
     if (s == null) return '';
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
 };
 

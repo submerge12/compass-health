@@ -9,6 +9,8 @@ const AdminPortal = {
 
   _currentPage: 'dashboard',
   _currentAdmin: null,
+  _reportsById: new Map(),
+  _usersById: new Map(),
 
   /* ── Bootstrap ───────────────────────────────────────────────── */
 
@@ -17,7 +19,9 @@ const AdminPortal = {
       const me = await API.getMe();
       if (!me.is_admin) {
         // Non-admin reached the admin view somehow — bounce them out.
-        App.showView('auth');
+        Auth.setAdmin(false);
+        localStorage.setItem('ch_has_bmr', me.has_bmr_profile ? '1' : '0');
+        App.showView(me.has_bmr_profile ? 'main' : 'bmr-wizard');
         return;
       }
       this._currentAdmin = me;
@@ -79,6 +83,7 @@ const AdminPortal = {
     else if (page === 'reports') this._renderReports();
     else if (page === 'recipes') this._renderRecipes();
     else if (page === 'users') this._renderUsers();
+    else if (page === 'ops') this._renderOps();
 
     I18n.apply();
   },
@@ -152,6 +157,7 @@ const AdminPortal = {
 
     try {
       const reports = await API.adminGetMissingRecipes();
+      this._reportsById = new Map(reports.map(r => [String(r.id), r]));
       if (!reports.length) {
         el.innerHTML = `<div style="color:var(--text-3);text-align:center;padding:20px">${t('admin.no_reports')}</div>`;
         return;
@@ -187,11 +193,11 @@ const AdminPortal = {
                   </td>
                   <td style="white-space:nowrap">
                     ${r.status === 'pending' ? `
-                      <button class="btn btn-ghost btn-sm" onclick="AdminPortal._markReviewed(${r.id})">
+                      <button class="btn btn-ghost btn-sm" data-admin-mark-reviewed="${r.id}">
                         ${t('admin.mark_reviewed')}
                       </button>
                       <button class="btn btn-sm btn-primary" style="margin-left:4px"
-                        onclick="AdminPortal._addRecipeFromReport(${r.id}, '${this._esc(r.ingredients_query)}')">
+                        data-admin-add-report="${r.id}">
                         ${t('admin.add_recipe_from_report')}
                       </button>` : ''}
                   </td>
@@ -200,6 +206,12 @@ const AdminPortal = {
             </tbody>
           </table>
         </div>`;
+      el.querySelectorAll('[data-admin-mark-reviewed]').forEach(btn => {
+        btn.addEventListener('click', () => this._markReviewed(parseInt(btn.dataset.adminMarkReviewed, 10)));
+      });
+      el.querySelectorAll('[data-admin-add-report]').forEach(btn => {
+        btn.addEventListener('click', () => this._addRecipeFromReport(parseInt(btn.dataset.adminAddReport, 10)));
+      });
     } catch (err) {
       el.innerHTML = `<div style="color:var(--rust);padding:12px">${this._esc(err.message)}</div>`;
     }
@@ -215,8 +227,9 @@ const AdminPortal = {
     }
   },
 
-  _addRecipeFromReport(reportId, ingredientsQuery) {
-    this._showAddRecipeModal(ingredientsQuery, reportId);
+  _addRecipeFromReport(reportId) {
+    const report = this._reportsById.get(String(reportId));
+    this._showAddRecipeModal(report?.ingredients_query || '', reportId);
   },
 
   /* ── Recipes ─────────────────────────────────────────────────── */
@@ -459,6 +472,7 @@ const AdminPortal = {
 
     try {
       const users = await API.adminGetUsers();
+      this._usersById = new Map(users.map(u => [String(u.id), u]));
       if (!users.length) {
         el.innerHTML = `<div style="color:var(--text-3);text-align:center;padding:20px">${t('admin.no_users')}</div>`;
         return;
@@ -523,6 +537,10 @@ const AdminPortal = {
                       onclick="AdminPortal._showUserDetail(${u.id})">
                       ${t('admin.user_details')}
                     </button>
+                    <button class="btn btn-ghost btn-sm" style="margin-left:4px"
+                      onclick="AdminPortal._showUserPreferences(${u.id})">
+                      ${this._txt('偏好修复', 'Preferences')}
+                    </button>
                     ${isSelf ? `<span style="color:var(--text-3);font-size:0.75rem;margin-left:4px">${t('admin.user_self_warning')}</span>` : `
                       <button class="btn btn-ghost btn-sm" style="margin-left:4px"
                         onclick="AdminPortal._toggleAdmin(${u.id}, ${!u.is_admin})">
@@ -533,7 +551,7 @@ const AdminPortal = {
                         ${u.is_active ? t('admin.user_deactivate') : t('admin.user_activate')}
                       </button>
                       <button class="btn btn-ghost btn-sm" style="color:var(--rust);margin-left:4px"
-                        onclick="AdminPortal._deleteUser(${u.id}, '${this._esc(u.username)}')">
+                        data-admin-delete-user="${u.id}">
                         ${t('admin.user_delete')}
                       </button>
                     `}
@@ -543,6 +561,13 @@ const AdminPortal = {
             </tbody>
           </table>
         </div>`;
+      el.querySelectorAll('[data-admin-delete-user]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const userId = parseInt(btn.dataset.adminDeleteUser, 10);
+          const user = this._usersById.get(String(userId));
+          this._deleteUser(userId, user?.username || '');
+        });
+      });
     } catch (err) {
       el.innerHTML = `<div style="color:var(--rust);padding:12px">${this._esc(err.message)}</div>`;
     }
@@ -718,6 +743,362 @@ const AdminPortal = {
   },
 
   /* ── Utility ─────────────────────────────────────────────────── */
+
+  async _showUserPreferences(userId) {
+    App.openModal(
+      this._txt('用户偏好修复', 'User Preference Repair'),
+      `<div id="admin-pref-body" style="font-size:0.85rem">
+         <div style="color:var(--text-3);text-align:center;padding:20px">${I18n.t('common.loading')}</div>
+       </div>`,
+      `<button class="btn btn-ghost" onclick="App.closeModal()">${I18n.t('common.cancel')}</button>
+       <button class="btn btn-primary" onclick="AdminPortal._saveUserPreferences(${userId})">${I18n.t('common.save')}</button>`
+    );
+
+    let data;
+    try {
+      data = await API.adminGetUserPreferences(userId);
+    } catch (err) {
+      const body = document.getElementById('admin-pref-body');
+      if (body) body.innerHTML = `<div style="color:var(--rust);padding:12px">${this._esc(err.message)}</div>`;
+      return;
+    }
+    this._activePreferencePayload = data;
+
+    const body = document.getElementById('admin-pref-body');
+    if (!body) return;
+    const known = data.known || {};
+    const selected = data.categories || {};
+    const labels = data.known_labels || {};
+    const audit = data.nutrition_audit || {};
+    const status = audit.validation?.overall || 'unknown';
+    const suggestions = (audit.suggestions || []).slice(0, 4);
+
+    body.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:14px;max-height:62vh;overflow:auto;padding-right:4px">
+        <div style="background:var(--surface-2);border:1px solid var(--border-1);border-radius:14px;padding:12px">
+          <strong>${this._txt('闭环状态', 'Closed-loop status')}: ${this._esc(status)}</strong>
+          <div style="color:var(--text-3);margin-top:6px">
+            ${this._txt('管理员只修复食物偏好，不修改用户真实饮食、体重或身体记录。', 'Admins repair food preferences only. Diet logs, weight and condition records stay read-only.')}
+          </div>
+          ${suggestions.length ? `<div style="margin-top:8px;color:var(--text-2)">
+            ${suggestions.map(s => this._esc(I18n.lang === 'zh' ? (s.message_zh || s.label_zh || s.ref) : (s.message_en || s.label_en || s.ref))).join('<br>')}
+          </div>` : ''}
+        </div>
+        ${Object.keys(known).map(category => `
+          <div>
+            <div style="font-weight:700;margin-bottom:8px">${this._esc(this._categoryLabel(category))}</div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px">
+              ${known[category].map(slug => {
+                const checked = (selected[category] || []).includes(slug) ? 'checked' : '';
+                const label = this._prefLabel(category, slug, labels);
+                return `<label style="display:flex;gap:8px;align-items:center;border:1px solid var(--border-1);border-radius:12px;padding:8px;background:var(--surface)">
+                  <input type="checkbox" data-admin-pref data-category="${this._esc(category)}" data-slug="${this._esc(slug)}" ${checked}>
+                  <span>${this._esc(label)}</span>
+                </label>`;
+              }).join('')}
+            </div>
+          </div>
+        `).join('')}
+        <div class="form-group" style="margin:0">
+          <label>${this._txt('修改原因（必填，会写入审计日志）', 'Reason (required, audited)')}</label>
+          <textarea id="admin-pref-reason" class="form-textarea" rows="3"
+            placeholder="${this._txt('例如：用户候选池无法闭环，按推荐补齐钙源和主食。', 'Example: Candidate pool could not close the loop, adding calcium source and staple per recommendation.')}"></textarea>
+        </div>
+      </div>`;
+  },
+
+  async _saveUserPreferences(userId) {
+    const reason = document.getElementById('admin-pref-reason')?.value.trim() || '';
+    if (!reason) {
+      App.showToast(this._txt('请填写修改原因', 'Please enter a reason'), 'error');
+      return;
+    }
+    const items = Array.from(document.querySelectorAll('[data-admin-pref]:checked')).map(el => ({
+      category: el.getAttribute('data-category'),
+      item_key: el.getAttribute('data-slug'),
+    }));
+    try {
+      await API.adminUpdateUserPreferences(userId, { items, replace: true, reason });
+      App.closeModal();
+      App.showToast(this._txt('偏好已更新', 'Preferences updated'), 'success');
+      if (this._currentPage === 'users') await this._loadUsers();
+    } catch (err) {
+      App.showToast(err.message, 'error');
+    }
+  },
+
+  async _renderOps() {
+    const el = document.getElementById('admin-page-ops');
+    if (!el) return;
+    el.innerHTML = `
+      <div class="page-header">
+        <div>
+          <h2>${this._txt('运营控制', 'Operations Control')}</h2>
+          <p style="color:var(--text-3);margin-top:4px">
+            ${this._txt('处理额度、闭环食物库和失败事件，不直接改用户真实健康记录。', 'Manage quotas, food-library loop checks and failures without editing real health records.')}
+          </p>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:12px">
+          <h3 style="margin:0">${this._txt('LLM 额度', 'LLM Quotas')}</h3>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+            <button class="btn btn-ghost btn-sm" onclick="AdminPortal._resetAllPoolQuota()">${this._txt('恢复全部候选池次数', 'Reset all pool naming')}</button>
+            <button class="btn btn-ghost btn-sm" onclick="AdminPortal._loadQuotaPanel()">${this._txt('刷新', 'Refresh')}</button>
+          </div>
+        </div>
+        <div id="admin-quota-panel">${this._loading()}</div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:12px">
+          <h3 style="margin:0">${this._txt('食物库闭环', 'Food Library Loop')}</h3>
+          <button class="btn btn-ghost btn-sm" onclick="AdminPortal._loadFoodLibraryPanel()">${this._txt('刷新', 'Refresh')}</button>
+        </div>
+        <div id="admin-library-panel">${this._loading()}</div>
+      </div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:12px">
+          <h3 style="margin:0">${this._txt('失败事件', 'Failure Events')}</h3>
+          <button class="btn btn-ghost btn-sm" onclick="AdminPortal._loadEventsPanel()">${this._txt('刷新', 'Refresh')}</button>
+        </div>
+        <div id="admin-events-panel">${this._loading()}</div>
+      </div>`;
+    this._loadQuotaPanel();
+    this._loadFoodLibraryPanel();
+    this._loadEventsPanel();
+  },
+
+  async _loadQuotaPanel() {
+    const el = document.getElementById('admin-quota-panel');
+    if (!el) return;
+    try {
+      const data = await API.adminGetLLMQuotas();
+      const rows = data.users || [];
+      if (!rows.length) {
+        el.innerHTML = `<div style="color:var(--text-3);padding:12px">${this._txt('暂无用户', 'No users')}</div>`;
+        return;
+      }
+      el.innerHTML = `
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>${this._txt('用户', 'User')}</th>
+                <th>${this._txt('候选池命名', 'Pool naming')}</th>
+                <th>${this._txt('菜谱建议', 'Recipe suggest')}</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map(row => {
+                const user = row.user || {};
+                const quotas = row.quotas || {};
+                return `<tr>
+                  <td>
+                    <strong>${this._esc(user.username || '--')}</strong>
+                    <div style="color:var(--text-3);font-size:0.78rem">#${user.id} · ${this._esc(user.membership_level || 'free')}</div>
+                  </td>
+                  <td>${this._quotaCell(quotas.pool_name)}</td>
+                  <td>${this._quotaCell(quotas.recipe_suggest)}</td>
+                  <td style="white-space:nowrap">
+                    <button class="btn btn-ghost btn-sm" onclick="AdminPortal._resetQuota(${user.id}, 'pool_name')">${this._txt('重置命名', 'Reset naming')}</button>
+                    <button class="btn btn-ghost btn-sm" style="margin-left:4px" onclick="AdminPortal._resetQuota(${user.id}, 'recipe_suggest')">${this._txt('重置建议', 'Reset suggest')}</button>
+                  </td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    } catch (err) {
+      el.innerHTML = `<div style="color:var(--rust);padding:12px">${this._esc(err.message)}</div>`;
+    }
+  },
+
+  _quotaCell(q) {
+    if (!q) return '--';
+    const next = q.next_refresh_at ? new Date(q.next_refresh_at).toLocaleString(I18n.lang === 'zh' ? 'zh-CN' : 'en-US') : '--';
+    return `<strong>${q.used || 0}/${q.limit || 0}</strong>
+      <div style="color:var(--text-3);font-size:0.78rem">${this._txt('剩余', 'Remaining')}: ${q.remaining || 0}</div>
+      <div style="color:var(--text-3);font-size:0.74rem">${this._txt('恢复', 'Refresh')}: ${this._esc(next)}</div>`;
+  },
+
+  _resetQuota(userId, kind) {
+    App.openModal(
+      this._txt('重置 LLM 额度', 'Reset LLM Quota'),
+      `<div class="form-group" style="margin:0">
+         <label>${this._txt('原因（必填，会写入审计日志）', 'Reason (required, audited)')}</label>
+         <textarea id="admin-quota-reason" class="form-textarea" rows="3"
+           placeholder="${this._txt('例如：LLM 返回乱码，已人工确认需要补偿一次。', 'Example: LLM returned unusable output; compensate one quota cycle.')}"></textarea>
+       </div>`,
+      `<button class="btn btn-ghost" onclick="App.closeModal()">${I18n.t('common.cancel')}</button>
+       <button class="btn btn-primary" onclick="AdminPortal._confirmResetQuota(${userId}, '${kind}')">${this._txt('确认重置', 'Confirm reset')}</button>`
+    );
+  },
+
+  _resetAllPoolQuota() {
+    App.openModal(
+      this._txt('恢复全部候选池次数', 'Reset All Pool Naming'),
+      `<div style="color:var(--text-2);font-size:0.88rem;margin-bottom:12px">
+         ${this._txt(
+           '将恢复所有用户的候选池命名次数；不会影响菜谱建议额度，也不会修改真实健康记录。',
+           'This resets pool-naming quota for every user. Recipe-suggestion quota and real health records are not changed.'
+         )}
+       </div>
+       <div class="form-group" style="margin:0">
+         <label>${this._txt('原因（必填，会写入审计日志）', 'Reason (required, audited)')}</label>
+         <textarea id="admin-quota-reset-all-reason" class="form-textarea" rows="3"
+           placeholder="${this._txt('例如：候选池命名额度异常，需要统一恢复。', 'Example: Pool naming quota behaved incorrectly; restore all users.')}"></textarea>
+       </div>`,
+      `<button class="btn btn-ghost" onclick="App.closeModal()">${I18n.t('common.cancel')}</button>
+       <button class="btn btn-primary" onclick="AdminPortal._confirmResetAllPoolQuota()">${this._txt('确认恢复', 'Confirm reset')}</button>`
+    );
+  },
+
+  async _confirmResetQuota(userId, kind) {
+    const reason = document.getElementById('admin-quota-reason')?.value.trim() || '';
+    if (!reason) {
+      App.showToast(this._txt('请填写重置原因', 'Please enter a reset reason'), 'error');
+      return;
+    }
+    try {
+      await API.adminResetLLMQuota(userId, { kind, reason });
+      App.closeModal();
+      App.showToast(this._txt('额度已重置', 'Quota reset'), 'success');
+      await this._loadQuotaPanel();
+    } catch (err) {
+      App.showToast(err.message, 'error');
+    }
+  },
+
+  async _confirmResetAllPoolQuota() {
+    const reason = document.getElementById('admin-quota-reset-all-reason')?.value.trim() || '';
+    if (!reason) {
+      App.showToast(this._txt('请填写重置原因', 'Please enter a reset reason'), 'error');
+      return;
+    }
+    try {
+      const result = await API.adminResetAllLLMQuotas({ kind: 'pool_name', reason });
+      App.closeModal();
+      App.showToast(
+        this._txt(
+          `已恢复 ${result.affected_user_count || 0} 个用户的候选池次数`,
+          `Reset pool naming for ${result.affected_user_count || 0} users`
+        ),
+        'success'
+      );
+      await this._loadQuotaPanel();
+    } catch (err) {
+      App.showToast(err.message, 'error');
+    }
+  },
+
+  async _loadFoodLibraryPanel() {
+    const el = document.getElementById('admin-library-panel');
+    if (!el) return;
+    try {
+      const data = await API.adminGetFoodLibrary();
+      const buckets = Object.entries(data.validation_buckets || {});
+      el.innerHTML = `
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+          <span class="badge">${this._txt('食物数', 'Foods')}: ${data.total_foods || 0}</span>
+          <span class="badge">${this._txt('校验桶', 'Validation buckets')}: ${buckets.length}</span>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>${this._txt('闭环类别', 'Loop bucket')}</th>
+                <th>${this._txt('食物数', 'Foods')}</th>
+                <th>${this._txt('性质', 'Type')}</th>
+                <th>${this._txt('示例', 'Examples')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${buckets.map(([key, bucket]) => `
+                <tr>
+                  <td><strong>${this._esc(I18n.lang === 'zh' ? bucket.label_zh : bucket.label_en)}</strong><div style="color:var(--text-3);font-size:0.75rem">${this._esc(key)}</div></td>
+                  <td>${bucket.count || 0}</td>
+                  <td>${bucket.is_blocking ? this._txt('阻断生成', 'Blocking') : this._txt('软缺口', 'Soft gap')}</td>
+                  <td style="color:var(--text-3);font-size:0.78rem">${this._esc((bucket.slugs || []).slice(0, 6).join(', '))}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    } catch (err) {
+      el.innerHTML = `<div style="color:var(--rust);padding:12px">${this._esc(err.message)}</div>`;
+    }
+  },
+
+  async _loadEventsPanel() {
+    const el = document.getElementById('admin-events-panel');
+    if (!el) return;
+    try {
+      const data = await API.adminGetObservabilityEvents({ limit: 80 });
+      const events = data.items || [];
+      if (!events.length) {
+        el.innerHTML = `<div style="color:var(--text-3);padding:12px">${this._txt('暂无事件', 'No events')}</div>`;
+        return;
+      }
+      el.innerHTML = `
+        <div style="color:var(--text-3);font-size:0.78rem;margin-bottom:10px">${this._txt('来源', 'Source')}: ${this._esc(data.source || '--')}</div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>${this._txt('时间', 'Time')}</th>
+                <th>${this._txt('级别', 'Level')}</th>
+                <th>${this._txt('用户', 'User')}</th>
+                <th>${this._txt('事件', 'Event')}</th>
+                <th>${this._txt('摘要', 'Summary')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${events.map(e => `
+                <tr>
+                  <td style="white-space:nowrap;color:var(--text-3);font-size:0.78rem">${this._esc(e.ts || '--')}</td>
+                  <td>${this._esc(e.lvl || '--')}</td>
+                  <td>${this._esc(String(e.user_id ?? '--'))}</td>
+                  <td>
+                    <strong>${this._esc(e.event || e.path || e.logger || '--')}</strong>
+                    <div style="color:var(--text-3);font-size:0.74rem">${this._esc(e.request_id || '')}</div>
+                  </td>
+                  <td style="max-width:520px;color:var(--text-2);font-size:0.82rem">${this._esc(e.msg || '--')}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    } catch (err) {
+      el.innerHTML = `<div style="color:var(--rust);padding:12px">${this._esc(err.message)}</div>`;
+    }
+  },
+
+  _loading() {
+    return `<div style="color:var(--text-3);text-align:center;padding:20px">${I18n.t('common.loading')}</div>`;
+  },
+
+  _txt(zh, en) {
+    return I18n.lang === 'zh' ? zh : en;
+  },
+
+  _categoryLabel(category) {
+    const labels = {
+      grains: this._txt('主食', 'Grains'),
+      vegetables: this._txt('蔬菜/菌菇/海藻', 'Vegetables / fungi / algae'),
+      fruits: this._txt('水果', 'Fruits'),
+      meat_low_fat: this._txt('低脂肉类', 'Low-fat protein'),
+      meat_mid_fat: this._txt('中脂肉类/海产', 'Mid-fat protein / seafood'),
+      soy: this._txt('豆制品', 'Soy'),
+      dairy: this._txt('乳制品', 'Dairy'),
+      nuts: this._txt('坚果/种子/油脂', 'Nuts / seeds / oils'),
+    };
+    return labels[category] || category;
+  },
+
+  _prefLabel(category, slug, labels) {
+    const label = labels?.[category]?.[slug];
+    if (label) return I18n.lang === 'zh' ? (label.zh || slug) : (label.en || slug);
+    return slug;
+  },
 
   _esc(str) {
     if (str === null || str === undefined) return '';

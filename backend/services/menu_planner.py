@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session
 import models
 from services import calorie as calorie_svc
 from services import food_library as FL
+from services import local_dates
 from services import nutrition_audit
 from services import planning_context as pc
 from services import recipe_matcher
@@ -586,9 +587,11 @@ def week_plan(db: Session, user: models.User) -> dict:
     for slug in slugs:
         for bucket in FL.FOOD_LIBRARY[slug]["validation_buckets"]:
             val_coverage[bucket].append(slug)
-    from services.nutrition_audit import _feasibility, _micronutrient_coverage
+    from services.nutrition_audit import _feasibility, _micronutrient_coverage, _sufficiency_check
     micro = _micronutrient_coverage(slugs)
-    verdict = _feasibility(val_coverage, micro)
+    gender = getattr(getattr(user, "bmr_profile", None), "gender", "female") or "female"
+    sufficiency = _sufficiency_check(slugs, gender)
+    verdict = _feasibility(val_coverage, micro, sufficiency)
 
     if verdict["overall"] == "not_closed_loop":
         return {
@@ -609,7 +612,7 @@ def week_plan(db: Session, user: models.User) -> dict:
             "message_en": "Please complete the BMR profile before planning.",
         }
 
-    today = datetime.now(timezone.utc)
+    today = local_dates.app_now()
     week_rows = _calendar_for_week(db, user.id, today, classification_full)
 
     weekly_counts: Counter = Counter()
@@ -647,6 +650,11 @@ def week_plan(db: Session, user: models.User) -> dict:
         })
 
     warnings = _coverage_warnings(days, slugs)
+    for gap in verdict.get("sufficiency_gaps", []):
+        warnings.append(
+            f"micronutrient sufficiency gap: {gap['role']} "
+            f"({gap['status']}, best={gap['best_coverage_pct']}%)"
+        )
 
     weekly_totals = {
         "kcal":      round(sum(d["totals"]["kcal"]      for d in days), 1),
@@ -736,6 +744,8 @@ def week_plan(db: Session, user: models.User) -> dict:
 # Pool targets
 _BREAKFAST_POOL_SIZE   = 6
 _MAIN_POOL_SIZE        = 24   # lunch + dinner combined (user decides assignment)
+_SUPPLEMENT_BREAKFAST_POOL_SIZE = 2
+_SUPPLEMENT_MAIN_POOL_SIZE = 8
 # Per the design spec: no ingredient may appear in more than floor(pool_size/5)
 # dishes within its type group (breakfast or main).
 # For main pool of 24: floor(24/5) = 4  →  ≤4/24 ≈ 17 %
@@ -787,7 +797,22 @@ def _sketch_day_type_affinities(parts: list[dict]) -> list[str]:
     return result
 
 
-def generate_dish_pool(db: Session, user: models.User) -> dict:
+def _pool_source_label(source: str) -> str:
+    return {
+        "generated": "Generated",
+        "recipe_library": "Recipe library",
+        "supplement": "Supplement",
+    }.get(source, source or "Generated")
+
+
+def _stamp_pool_source(dish: dict, source: str) -> dict:
+    stamped = dict(dish)
+    stamped["source"] = source
+    stamped["source_label"] = _pool_source_label(source)
+    return stamped
+
+
+def generate_dish_pool(db: Session, user: models.User, variant: int = 0) -> dict:
     """Generate a pool of ~30 candidate dishes for the user to choose from.
 
     Returns:
@@ -820,9 +845,11 @@ def generate_dish_pool(db: Session, user: models.User) -> dict:
         for bucket in FL.FOOD_LIBRARY[slug]["validation_buckets"]:
             val_coverage[bucket].append(slug)
 
-    from services.nutrition_audit import _feasibility, _micronutrient_coverage
+    from services.nutrition_audit import _feasibility, _micronutrient_coverage, _sufficiency_check
     micro = _micronutrient_coverage(slugs)
-    verdict = _feasibility(val_coverage, micro)
+    gender = getattr(getattr(user, "bmr_profile", None), "gender", "female") or "female"
+    sufficiency = _sufficiency_check(slugs, gender)
+    verdict = _feasibility(val_coverage, micro, sufficiency)
 
     if verdict["overall"] == "not_closed_loop":
         return {
@@ -863,7 +890,7 @@ def generate_dish_pool(db: Session, user: models.User) -> dict:
     }
 
     # Week skeleton: 7-day day-type hints with locked/free flag.
-    today = datetime.now(timezone.utc)
+    today = local_dates.app_now()
     week_rows = _calendar_for_week(db, user.id, today, classification_full)
     required_slot_counts, _ = _week_slot_requirements(db, user, week_rows, ignore_planned=True)
     week_skeleton = [
@@ -878,6 +905,8 @@ def generate_dish_pool(db: Session, user: models.User) -> dict:
         for row in week_rows
     ]
 
+    variant = max(int(variant or 0), 0)
+
     # ── Build breakfast pool ──────────────────────────────────────────────────
     breakfast_pool: list[dict] = []
     bkfst_slug_counts: Counter = Counter()
@@ -885,12 +914,13 @@ def generate_dish_pool(db: Session, user: models.User) -> dict:
 
     # Rotate through protein buckets to diversify (egg, dairy, soy, white meat)
     bkfst_protein_rotation = ["egg", "dairy", "soy_product", "lean_white_meat"]
+    breakfast_rotation_offset = variant % len(bkfst_protein_rotation)
     bkfst_attempts = 0
 
     while len(breakfast_pool) < _BREAKFAST_POOL_SIZE and bkfst_attempts < 40:
         bkfst_attempts += 1
         # Vary which protein bucket we draw from
-        rotation_idx = (len(breakfast_pool) + bkfst_attempts) % len(bkfst_protein_rotation)
+        rotation_idx = (len(breakfast_pool) + bkfst_attempts + breakfast_rotation_offset) % len(bkfst_protein_rotation)
         week_counts: Counter = Counter(bkfst_slug_counts)
         meal = _compose_meal(
             "breakfast", "moderate_activity", day_target,
@@ -910,6 +940,8 @@ def generate_dish_pool(db: Session, user: models.User) -> dict:
         breakfast_pool.append({
             "sketch_id": f"breakfast-{len(breakfast_pool)}",
             "meal_type": "breakfast",
+            "source": "generated",
+            "source_label": _pool_source_label("generated"),
             "day_type_affinities": [],
             "parts": meal["parts"],
             "totals": meal["totals"],
@@ -927,13 +959,14 @@ def generate_dish_pool(db: Session, user: models.User) -> dict:
         "red_meat_day", "deep_sea_fish_day", "moderate_activity",
         "low_activity", "high_activity", "red_meat_day", "pantry_clearance",
     ]
+    day_type_offset = variant % len(day_type_cycle)
     main_attempts = 0
 
     while len(main_pool) < _MAIN_POOL_SIZE and main_attempts < 80:
         main_attempts += 1
-        day_type = day_type_cycle[main_attempts % len(day_type_cycle)]
+        day_type = day_type_cycle[(main_attempts + day_type_offset) % len(day_type_cycle)]
         # Alternate lunch and dinner targets to vary macro proportions
-        meal_type = "lunch" if main_attempts % 2 == 0 else "dinner"
+        meal_type = "lunch" if (main_attempts + variant) % 2 == 0 else "dinner"
         week_counts: Counter = Counter(main_slug_counts)
         meal = _compose_meal(
             meal_type, day_type, day_target,
@@ -950,6 +983,8 @@ def generate_dish_pool(db: Session, user: models.User) -> dict:
         main_pool.append({
             "sketch_id": f"main-{len(main_pool)}",
             "meal_type": "main",
+            "source": "generated",
+            "source_label": _pool_source_label("generated"),
             "day_type_affinities": _sketch_day_type_affinities(meal["parts"]),
             "parts": meal["parts"],
             "totals": meal["totals"],
@@ -964,12 +999,212 @@ def generate_dish_pool(db: Session, user: models.User) -> dict:
             "carbs_g": day_target["carbs_g"],
             "fat_g": day_target["fat_g"],
         },
+        "variant": variant,
         "week_skeleton": week_skeleton,
         "required_slot_counts": required_slot_counts,
         "requires_breakfast_pool": required_slot_counts["breakfast"] > 0,
         "requires_main_pool": (required_slot_counts["lunch"] + required_slot_counts["dinner"]) > 0,
         "breakfast_pool": breakfast_pool,
         "main_pool": main_pool,
+    }
+
+
+def _target_for_pool_generation(db: Session, user: models.User) -> dict | None:
+    baseline = calorie_svc.build_daily_targets(db, user)
+    if not baseline.get("has_bmr_profile"):
+        return None
+    bmr = calorie_svc.compute_bmr(
+        user.bmr_profile.age,
+        user.bmr_profile.gender,
+        user.bmr_profile.height_cm,
+        user.bmr_profile.weight_kg,
+    )
+    tdee = calorie_svc.compute_tdee(bmr, "moderately_active")
+    kcal, _ = calorie_svc.compute_calorie_target(user.bmr_profile.goal, tdee, bmr)
+    macros = calorie_svc.compute_macros(
+        calories=kcal,
+        weight_kg=user.bmr_profile.weight_kg,
+        gender=user.bmr_profile.gender,
+        age=user.bmr_profile.age,
+        goal=user.bmr_profile.goal,
+        is_exerciser=True,
+    )
+    return {
+        "calorie_target": macros["calories"],
+        "protein_g": macros["protein_g"],
+        "carbs_g": macros["carbs_g"],
+        "fat_g": macros["fat_g"],
+    }
+
+
+def _classification_for_slugs(slugs: list[str] | set[str]) -> dict[str, list[str]]:
+    classification = {bucket: [] for bucket in FL.EXECUTION_BUCKETS}
+    for slug in sorted({str(s).strip() for s in slugs if str(s).strip()}):
+        entry = FL.FOOD_LIBRARY.get(slug)
+        if not entry:
+            continue
+        for bucket in entry["execution_buckets"]:
+            classification[bucket].append(slug)
+    return classification
+
+
+def _preferred_supplement_slugs(
+    library_slugs: set[str],
+    selected_food_slugs: list[str],
+    missing_roles: list[str],
+    required_buckets: list[str],
+) -> list[str]:
+    preferred: list[str] = []
+
+    def add(slug: str) -> None:
+        slug = str(slug or "").strip()
+        if slug and slug in library_slugs and slug not in preferred:
+            preferred.append(slug)
+
+    for slug in selected_food_slugs:
+        add(slug)
+    for bucket in required_buckets:
+        for slug in FL.slugs_by_execution_bucket(str(bucket)):
+            add(slug)
+            if len(preferred) >= 12:
+                break
+    for role in missing_roles:
+        for slug in FL.slugs_by_micronutrient(str(role)):
+            add(slug)
+            if len(preferred) >= 12:
+                break
+    return preferred
+
+
+def _supplement_day_type_for_slug(slug: str, required_buckets: list[str]) -> str:
+    buckets = set(FL.FOOD_LIBRARY.get(slug, {}).get("execution_buckets", []))
+    required = set(required_buckets or [])
+    if "red_meat" in buckets or "red_meat" in required:
+        return "red_meat_day"
+    if "deep_sea_fish" in buckets or "deep_sea_fish" in required:
+        return "deep_sea_fish_day"
+    if "slow_carb_staple" in buckets:
+        return "low_activity"
+    if "fast_carb_staple" in buckets:
+        return "high_activity"
+    return "moderate_activity"
+
+
+def _add_preferred_food(meal: dict, preferred_slug: str, meal_type: str) -> dict:
+    preferred_slug = str(preferred_slug or "").strip()
+    if not preferred_slug or preferred_slug not in FL.FOOD_LIBRARY:
+        return meal
+    parts = list(meal.get("parts") or [])
+    if any(part.get("slug") == preferred_slug for part in parts):
+        return meal
+
+    entry = FL.FOOD_LIBRARY[preferred_slug]
+    buckets = set(entry.get("execution_buckets", []))
+    max_g = float(entry.get("max_practical_serving_g") or 100.0)
+    if entry.get("primary_macro") == "fat" or "nut_seed_functional" in buckets:
+        grams = min(30.0, max_g)
+    elif buckets & {"dark_leafy_green", "cruciferous_fungi_algae"}:
+        grams = min(100.0, max_g)
+    elif meal_type == "breakfast":
+        grams = min(80.0, max_g)
+    else:
+        grams = min(120.0, max_g)
+    if grams <= 0:
+        return meal
+
+    parts.append(_fixed_portion(preferred_slug, grams))
+    meal = dict(meal)
+    meal["parts"] = parts
+    meal["totals"] = _sum_portion(parts)
+    return meal
+
+
+def generate_supplement_pool(
+    db: Session,
+    user: models.User,
+    *,
+    selected_food_slugs: list[str] | None = None,
+    missing_roles: list[str] | None = None,
+    required_buckets: list[str] | None = None,
+    variant: int = 0,
+) -> dict:
+    selected_food_slugs = selected_food_slugs or []
+    missing_roles = missing_roles or []
+    required_buckets = required_buckets or []
+
+    library_slugs = {
+        slug for slug in nutrition_audit.load_user_library(db, user.id)
+        if slug in FL.FOOD_LIBRARY
+    }
+    library_slugs.update(
+        str(slug).strip()
+        for slug in selected_food_slugs
+        if str(slug).strip() in FL.FOOD_LIBRARY
+    )
+    if not library_slugs:
+        return {
+            "feasibility": "not_closed_loop",
+            "message_zh": "Current food library is empty.",
+            "message_en": "The food library is empty, so a supplement pool cannot be created.",
+        }
+
+    day_target = _target_for_pool_generation(db, user)
+    if day_target is None:
+        return {
+            "feasibility": "no_bmr",
+            "message_zh": "Please complete the BMR profile before planning.",
+            "message_en": "Please complete the BMR profile before planning.",
+        }
+
+    classification = _classification_for_slugs(library_slugs)
+    preferred = _preferred_supplement_slugs(
+        library_slugs,
+        selected_food_slugs,
+        missing_roles,
+        required_buckets,
+    )
+    if not preferred:
+        preferred = sorted(library_slugs)[:8]
+
+    variant = max(int(variant or 0), 0)
+
+    def build_group(group: str, size: int) -> list[dict]:
+        pool: list[dict] = []
+        seen: set[frozenset[str]] = set()
+        counts: Counter = Counter()
+        attempts = 0
+        while len(pool) < size and attempts < size * 8:
+            attempts += 1
+            preferred_slug = preferred[(len(pool) + attempts + variant) % len(preferred)]
+            meal_type = "breakfast" if group == "breakfast" else ("lunch" if attempts % 2 else "dinner")
+            day_type = _supplement_day_type_for_slug(preferred_slug, required_buckets)
+            meal = _compose_meal(meal_type, day_type, day_target, classification, Counter(counts))
+            meal = _add_preferred_food(meal, preferred_slug, meal_type)
+            parts = meal.get("parts") or []
+            fp = _ingredient_fingerprint(parts)
+            if not fp or fp in seen:
+                continue
+            seen.add(fp)
+            for part in parts:
+                counts[part["slug"]] += 1
+            pool.append({
+                "sketch_id": f"supplement-{group}-{len(pool)}",
+                "meal_type": group,
+                "source": "supplement",
+                "source_label": _pool_source_label("supplement"),
+                "day_type_affinities": _sketch_day_type_affinities(parts),
+                "parts": parts,
+                "totals": meal["totals"],
+                "ingredient_slugs": sorted(fp),
+            })
+        return pool
+
+    return {
+        "feasibility": "ok",
+        "variant": variant,
+        "breakfast_pool": build_group("breakfast", _SUPPLEMENT_BREAKFAST_POOL_SIZE),
+        "main_pool": build_group("main", _SUPPLEMENT_MAIN_POOL_SIZE),
+        "warnings": [],
     }
 
 
@@ -1190,6 +1425,22 @@ def _missing_micronutrient_guidance(weekly_micro_report: dict[str, dict]) -> dic
     }
 
 
+def _execution_bucket_guidance(required_buckets: set[str]) -> list[dict]:
+    recommended: dict[str, dict] = {}
+    for bucket in sorted(required_buckets):
+        label = FL.EXECUTION_BUCKET_LABELS.get(bucket, {"zh": bucket, "en": bucket})
+        for slug in FL.slugs_by_execution_bucket(bucket)[:6]:
+            recommended.setdefault(slug, {
+                "slug": slug,
+                "name_zh": FL.display_name(slug, "zh"),
+                "name_en": FL.display_name(slug, "en"),
+                "roles": [bucket],
+                "role_labels_zh": [label["zh"]],
+                "role_labels_en": [label["en"]],
+            })
+    return list(recommended.values())
+
+
 def _ingredient_text(ingredients: list[dict], language: str) -> str:
     lines: list[str] = []
     for ing in ingredients:
@@ -1221,6 +1472,19 @@ def _normalize_selected_dish(
     name = str(dish.get("name") or "").strip()
     if not name:
         raise ValueError("dish name is required")
+
+    raw_recipe_id = dish.get("recipe_id")
+    recipe_id: Optional[int] = None
+    if raw_recipe_id is not None:
+        try:
+            recipe_id = int(raw_recipe_id)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name}: invalid recipe_id")
+        if recipe_id <= 0:
+            raise ValueError(f"{name}: invalid recipe_id")
+    source = str(dish.get("source") or ("recipe_library" if recipe_id else "generated")).strip()
+    if source not in {"generated", "recipe_library", "supplement"}:
+        source = "generated"
 
     raw_ingredients = dish.get("ingredients") or dish.get("ingredients_json") or []
     if not isinstance(raw_ingredients, list) or not raw_ingredients:
@@ -1268,6 +1532,9 @@ def _normalize_selected_dish(
     return {
         "dish_id": str(dish.get("dish_id") or f"{expected_meal_type}:{len(ingredient_slugs)}:{name}"),
         "meal_type": expected_meal_type,
+        "source": source,
+        "source_label": str(dish.get("source_label") or _pool_source_label(source)),
+        "recipe_id": recipe_id,
         "name": name,
         "ingredients": ingredients,
         "ingredients_text": _ingredient_text(ingredients, language),
@@ -1448,7 +1715,7 @@ def arrange_selected_pool(
         for bucket in entry["execution_buckets"]:
             classification[bucket].append(slug)
 
-    start_date = datetime.now(timezone.utc)
+    start_date = local_dates.app_now()
     week_rows = _calendar_for_week(db, user.id, start_date, classification)
     required_slot_counts, context_by_date = _week_slot_requirements(db, user, week_rows)
     locked_requirements = {
@@ -1467,11 +1734,13 @@ def arrange_selected_pool(
                 "error": "selection_cannot_cover_reinforcement_day",
                 "message_zh": f"当前主菜池无法覆盖“{label}”所需的食材类型，请保留对应主菜后再试。",
                 "message_en": f"The selected main-dish pool cannot satisfy the required ingredient type for '{label}'.",
+                "required_buckets": sorted(required_buckets),
+                "recommended_foods": _execution_bucket_guidance(required_buckets),
             }
 
     gender = getattr(getattr(user, "bmr_profile", None), "gender", "female") or "female"
     weekly_micro_targets = {
-        role: float(meta.get(f"rda_{gender}", meta.get("rda_women", 0)) or 0) * 7.0
+        role: nutrition_audit.rda_for_gender(meta, gender, 0.0) * 7.0
         for role, meta in FL.MICRONUTRIENT_ROLES.items()
     }
 
@@ -1599,7 +1868,14 @@ def arrange_selected_pool(
             meal_payloads[meal_type] = {
                 "meal_type": meal_type,
                 "source": "selected",
-                "status": pc.SLOT_STATUS_GENERATED,
+                "status": (
+                    pc.SLOT_STATUS_RECIPE
+                    if dish.get("source") == "recipe_library" or dish.get("recipe_id")
+                    else pc.SLOT_STATUS_GENERATED
+                ),
+                "candidate_source": dish.get("source", "generated"),
+                "source_label": dish.get("source_label") or _pool_source_label(dish.get("source", "generated")),
+                "recipe_id": dish.get("recipe_id"),
                 "name": dish["name"],
                 "totals": dish["totals"],
                 "ingredients": dish["ingredients"],

@@ -28,6 +28,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 import models
+from services import local_dates
 
 
 # ── Activity ─────────────────────────────────────────────────────────────────
@@ -336,7 +337,11 @@ def _empty_macros(calories: float) -> dict:
 # ── Daily activity helpers ───────────────────────────────────────────────────
 
 def today_utc_date() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return local_dates.today_key()
+
+
+def today_local_date() -> str:
+    return today_utc_date()
 
 
 def get_activity_for_date(db: Session, user_id: int, date_str: str) -> Optional[str]:
@@ -353,8 +358,16 @@ def get_activity_for_date(db: Session, user_id: int, date_str: str) -> Optional[
 
 
 def default_activity_for_user(db: Session, user_id: int) -> str:
-    """7-day modal average, or the DEFAULT_ACTIVITY fallback."""
-    today = datetime.now(timezone.utc)
+    """Profile default, 7-day modal average, or the DEFAULT_ACTIVITY fallback."""
+    profile = (
+        db.query(models.BMRProfile.activity_level)
+        .filter(models.BMRProfile.user_id == user_id)
+        .first()
+    )
+    if profile and profile[0] in ACTIVITY_MULTIPLIERS:
+        return profile[0]
+
+    today = local_dates.app_now()
     cutoff = (today - timedelta(days=7)).strftime("%Y-%m-%d")
     today_str = today.strftime("%Y-%m-%d")
     recent = (
@@ -391,7 +404,7 @@ WINDOW_CLOSE_HOUR = 8   # 8 AM target day
 
 def editable_target_date(now: Optional[datetime] = None) -> Optional[str]:
     """Which date can currently be edited? None = outside the window."""
-    now = now or datetime.now(timezone.utc)
+    now = local_dates.app_now(now)
     if now.hour >= WINDOW_OPEN_HOUR:
         return (now + timedelta(days=1)).strftime("%Y-%m-%d")
     if now.hour < WINDOW_CLOSE_HOUR:

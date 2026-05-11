@@ -1,23 +1,23 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 import models
 from auth import get_current_user
 from database import get_db
-from services import calorie
+from services import calorie, local_dates
 
 router = APIRouter(prefix="/api/daily-activity", tags=["daily-activity"])
 
 
 class ActivityUpsertRequest(BaseModel):
-    activity_level: str
+    activity_level: str = Field(..., min_length=1, max_length=50)
     # Optional — when omitted, the server picks the currently editable target
     # date (tomorrow if hour >= 19, today if hour < 8, else 422).
-    date: Optional[str] = None
+    date: Optional[str] = Field(default=None, min_length=10, max_length=10)
 
 
 def _resolve_target_date(requested: Optional[str]) -> str:
@@ -102,12 +102,11 @@ def upsert_today(
 
 @router.get("/history")
 def get_history(
-    days: int = 7,
+    days: int = Query(7, ge=1, le=90),
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    today = datetime.now(timezone.utc)
-    cutoff = (today - timedelta(days=days)).strftime("%Y-%m-%d")
+    cutoff = local_dates.date_range_ending_today(days + 1)[0]
     rows = (
         db.query(models.DailyActivityPlan)
         .filter(

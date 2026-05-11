@@ -1,14 +1,18 @@
+import json
+import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 import models
 from auth import get_current_user
 from database import get_db
-from services import audit, calorie, engagement
+from routers.preferences_routes import CATEGORY_ITEMS
+from services import audit, calorie, engagement, food_library as FL, llm_quota, local_dates, nutrition_audit, recipe_access
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -26,27 +30,43 @@ def require_admin(
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class RecipeUpsert(BaseModel):
-    name: str
-    ingredients: Optional[str] = None
-    steps: Optional[str] = None
-    video_url: Optional[str] = None
-    category: Optional[str] = None
-    meal_types: Optional[str] = None   # CSV: "breakfast,lunch,dinner"
-    calories: Optional[int] = None
-    protein_g: Optional[float] = None
-    carbs_g: Optional[float] = None
-    fat_g: Optional[float] = None
-    serving_g: Optional[float] = None
+    name: str = Field(..., min_length=1, max_length=120)
+    ingredients: Optional[str] = Field(default=None, max_length=4000)
+    steps: Optional[str] = Field(default=None, max_length=4000)
+    video_url: Optional[str] = Field(default=None, max_length=500)
+    category: Optional[str] = Field(default=None, max_length=80)
+    meal_types: Optional[str] = Field(default=None, max_length=80)   # CSV: "breakfast,lunch,dinner"
+    calories: Optional[int] = Field(default=None, ge=0, le=5000)
+    protein_g: Optional[float] = Field(default=None, ge=0, le=500)
+    carbs_g: Optional[float] = Field(default=None, ge=0, le=1000)
+    fat_g: Optional[float] = Field(default=None, ge=0, le=500)
+    serving_g: Optional[float] = Field(default=None, gt=0, le=3000)
 
 
 class ReportStatusUpdate(BaseModel):
-    status: str   # pending / reviewed
+    status: str = Field(..., min_length=1, max_length=20)   # pending / reviewed
 
 
 class UserPatch(BaseModel):
     is_admin: Optional[bool] = None
     is_active: Optional[bool] = None
-    membership_level: Optional[str] = None   # free / normal / pro / pro_max
+    membership_level: Optional[str] = Field(default=None, max_length=20)   # free / normal / pro / pro_max
+
+
+class AdminPreferenceItem(BaseModel):
+    category: str = Field(..., min_length=1, max_length=50)
+    item_key: str = Field(..., min_length=1, max_length=80)
+
+
+class AdminPreferenceUpdate(BaseModel):
+    items: list[AdminPreferenceItem] = Field(default_factory=list, max_length=300)
+    replace: bool = True
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+class AdminQuotaReset(BaseModel):
+    kind: Optional[str] = Field(default=None, max_length=80)
+    reason: Optional[str] = Field(default=None, max_length=500)
 
 
 # ── Missing-recipe reports ────────────────────────────────────────────────────
@@ -88,6 +108,8 @@ def update_report(
     ).first()
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
+    if body.status not in {"pending", "reviewed"}:
+        raise HTTPException(status_code=422, detail="Invalid report status")
     status_before = report.status
     report.status = body.status
     audit.record(
@@ -120,11 +142,16 @@ def admin_create_recipe(
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
+    try:
+        video_url = recipe_access.normalize_video_url(body.video_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
     recipe = models.Recipe(
         name=body.name,
         ingredients=body.ingredients,
         steps=body.steps,
-        video_url=body.video_url,
+        video_url=video_url,
         category=body.category,
         meal_types=body.meal_types,
         calories=body.calories,
@@ -160,11 +187,19 @@ def admin_update_recipe(
         raise HTTPException(status_code=404, detail="Recipe not found")
 
     changed: list[str] = []
+    try:
+        video_url = recipe_access.normalize_video_url(body.video_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
     if recipe.name != body.name:
         changed.append("name")
     recipe.name = body.name
+    if recipe.video_url != video_url:
+        recipe.video_url = video_url
+        changed.append("video_url")
     for field in (
-        "ingredients", "steps", "video_url", "category",
+        "ingredients", "steps", "category",
         "meal_types", "calories", "protein_g", "carbs_g", "fat_g", "serving_g",
     ):
         val = getattr(body, field)
@@ -210,6 +245,16 @@ def admin_delete_recipe(
     recipe = db.query(models.Recipe).filter(models.Recipe.id == recipe_id).first()
     if not recipe:
         raise HTTPException(status_code=404, detail="Recipe not found")
+    reference_count = (
+        db.query(models.MealPlanEntry).filter(models.MealPlanEntry.recipe_id == recipe_id).count()
+        + db.query(models.UserFixedMeal).filter(models.UserFixedMeal.recipe_id == recipe_id).count()
+        + db.query(models.UserSavedRecipe).filter(models.UserSavedRecipe.recipe_id == recipe_id).count()
+    )
+    if reference_count:
+        raise HTTPException(
+            status_code=409,
+            detail="Recipe is still referenced by meal plans, fixed meals, or saved recipes.",
+        )
     audit.record(
         db, admin, "recipe.delete",
         target_type="recipe", target_id=recipe.id,
@@ -335,8 +380,11 @@ def admin_delete_user(
     db.query(models.DietLog).filter(models.DietLog.user_id == user_id).delete()
     db.query(models.PhysicalCondition).filter(models.PhysicalCondition.user_id == user_id).delete()
     db.query(models.CheckIn).filter(models.CheckIn.user_id == user_id).delete()
+    db.query(models.LLMCallLog).filter(models.LLMCallLog.user_id == user_id).delete()
     db.query(models.DailyActivityPlan).filter(models.DailyActivityPlan.user_id == user_id).delete()
     db.query(models.MealPlanEntry).filter(models.MealPlanEntry.user_id == user_id).delete()
+    db.query(models.UserSavedRecipe).filter(models.UserSavedRecipe.user_id == user_id).delete()
+    db.query(models.UserFixedMeal).filter(models.UserFixedMeal.user_id == user_id).delete()
     db.query(models.DailyMealPlanConfirmation).filter(
         models.DailyMealPlanConfirmation.user_id == user_id
     ).delete()
@@ -344,6 +392,10 @@ def admin_delete_user(
         models.MissingRecipeReport.user_id == user_id
     ).delete()
     db.query(models.FoodPreference).filter(models.FoodPreference.user_id == user_id).delete()
+    db.query(models.Recipe).filter(models.Recipe.submitted_by == user_id).update(
+        {"submitted_by": None},
+        synchronize_session=False,
+    )
     if user.bmr_profile:
         db.delete(user.bmr_profile)
     if user.membership:
@@ -379,7 +431,7 @@ def admin_get_user_detail(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    now = datetime.now(timezone.utc)
+    now = local_dates.app_now()
     today = now.strftime("%Y-%m-%d")
     cutoff = (now - timedelta(days=7)).strftime("%Y-%m-%d")
 
@@ -471,6 +523,243 @@ def admin_get_user_detail(
 
 # ── Audit log ─────────────────────────────────────────────────────────────────
 
+@router.get("/users/{user_id}/preferences")
+def admin_get_user_preferences(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    user = _get_user_or_404(db, user_id)
+    return {
+        "user": _user_dict(user),
+        "known": CATEGORY_ITEMS,
+        "known_labels": _known_preference_labels(),
+        "categories": _group_food_preferences(db, user.id),
+        "nutrition_audit": nutrition_audit.run_audit(db, user),
+    }
+
+
+@router.put("/users/{user_id}/preferences")
+def admin_update_user_preferences(
+    user_id: int,
+    body: AdminPreferenceUpdate,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    user = _get_user_or_404(db, user_id)
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="Admin preference changes require a reason")
+
+    before = _group_food_preferences(db, user.id)
+    to_insert = _validate_preference_items(body.items)
+
+    if body.replace:
+        db.query(models.FoodPreference).filter(
+            models.FoodPreference.user_id == user.id
+        ).delete(synchronize_session=False)
+
+    existing = {
+        (r.category, r.item_key)
+        for r in db.query(models.FoodPreference)
+        .filter(models.FoodPreference.user_id == user.id)
+        .all()
+    }
+    seen: set[tuple[str, str]] = set()
+    for category, item_key in to_insert:
+        if (category, item_key) in existing or (category, item_key) in seen:
+            continue
+        seen.add((category, item_key))
+        db.add(models.FoodPreference(
+            user_id=user.id,
+            category=category,
+            item_key=item_key,
+        ))
+
+    db.flush()
+    after = _group_food_preferences(db, user.id)
+    audit.record(
+        db, admin, "user.preferences.update",
+        target_type="user", target_id=user.id,
+        details={
+            "username": user.username,
+            "reason": reason,
+            "replace": body.replace,
+            "before_count": sum(len(v) for v in before.values()),
+            "after_count": sum(len(v) for v in after.values()),
+            "changed_categories": _changed_preference_categories(before, after),
+        },
+    )
+    db.commit()
+    return {
+        "user": _user_dict(user),
+        "known": CATEGORY_ITEMS,
+        "known_labels": _known_preference_labels(),
+        "categories": after,
+        "nutrition_audit": nutrition_audit.run_audit(db, user),
+    }
+
+
+@router.get("/llm-quotas")
+def admin_list_llm_quotas(
+    user_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    q = db.query(models.User)
+    if user_id is not None:
+        q = q.filter(models.User.id == user_id)
+    users = q.order_by(models.User.created_at.desc()).all()
+    kinds = list(llm_quota.QUOTAS.keys())
+    return {
+        "kinds": {
+            kind: {
+                "limit": rule.limit,
+                "window_days": rule.window_days,
+            }
+            for kind, rule in llm_quota.QUOTAS.items()
+        },
+        "users": [
+            {
+                "user": _user_dict(user),
+                "quotas": {
+                    kind: llm_quota.usage(db, user.id, kind)
+                    for kind in kinds
+                },
+            }
+            for user in users
+        ],
+    }
+
+
+@router.post("/llm-quotas/reset")
+def admin_reset_all_llm_quota(
+    body: AdminQuotaReset,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="Quota resets require a reason")
+
+    kind = body.kind or llm_quota.POOL_NAME
+    if kind not in llm_quota.QUOTAS:
+        raise HTTPException(status_code=422, detail="Unknown quota kind")
+
+    base_query = db.query(models.LLMCallLog).filter(models.LLMCallLog.kind == kind)
+    affected_user_count = (
+        db.query(models.LLMCallLog.user_id)
+        .filter(models.LLMCallLog.kind == kind)
+        .distinct()
+        .count()
+    )
+    deleted = base_query.delete(synchronize_session=False)
+    db.flush()
+    audit.record(
+        db, admin, "system.llm_quota.reset",
+        target_type="llm_quota", target_id=None,
+        details={
+            "kind": kind,
+            "reason": reason,
+            "scope": "all_users",
+            "deleted_rows": deleted,
+            "affected_user_count": affected_user_count,
+        },
+    )
+    db.commit()
+    return {
+        "kind": kind,
+        "scope": "all_users",
+        "deleted_rows": deleted,
+        "affected_user_count": affected_user_count,
+    }
+
+
+@router.post("/users/{user_id}/llm-quota/reset")
+def admin_reset_llm_quota(
+    user_id: int,
+    body: AdminQuotaReset,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    user = _get_user_or_404(db, user_id)
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="Quota resets require a reason")
+
+    if body.kind is not None and body.kind not in llm_quota.QUOTAS:
+        raise HTTPException(status_code=422, detail="Unknown quota kind")
+
+    kinds = [body.kind] if body.kind else list(llm_quota.QUOTAS.keys())
+    before = {kind: llm_quota.usage(db, user.id, kind) for kind in kinds}
+    query = db.query(models.LLMCallLog).filter(models.LLMCallLog.user_id == user.id)
+    if body.kind:
+        query = query.filter(models.LLMCallLog.kind == body.kind)
+    deleted = query.delete(synchronize_session=False)
+    db.flush()
+    after = {kind: llm_quota.usage(db, user.id, kind) for kind in kinds}
+    audit.record(
+        db, admin, "user.llm_quota.reset",
+        target_type="user", target_id=user.id,
+        details={
+            "username": user.username,
+            "kind": body.kind or "all",
+            "reason": reason,
+            "deleted_rows": deleted,
+            "before": before,
+            "after": after,
+        },
+    )
+    db.commit()
+    return {
+        "user": _user_dict(user),
+        "kind": body.kind or "all",
+        "deleted_rows": deleted,
+        "quotas": after,
+    }
+
+
+@router.get("/food-library")
+def admin_food_library(
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    return _food_library_payload()
+
+
+@router.get("/observability/events")
+def admin_observability_events(
+    limit: int = Query(80, ge=1, le=300),
+    event: Optional[str] = None,
+    user_id: Optional[int] = None,
+    logger: Optional[str] = None,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    path = _app_log_path()
+    if not path.exists():
+        return {"source": str(path), "items": []}
+
+    items: list[dict] = []
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for line in reversed(lines):
+        if len(items) >= limit:
+            break
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if event and record.get("event") != event:
+            continue
+        if logger and record.get("logger") != logger:
+            continue
+        if user_id is not None and str(record.get("user_id")) != str(user_id):
+            continue
+        items.append(_sanitize_log_record(record))
+
+    return {"source": str(path), "items": items}
+
+
 @router.get("/audit")
 def admin_list_audit(
     limit: int = Query(100, ge=1, le=500),
@@ -519,6 +808,143 @@ def admin_list_audit(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _get_user_or_404(db: Session, user_id: int) -> models.User:
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+def _group_food_preferences(db: Session, user_id: int) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {category: [] for category in CATEGORY_ITEMS}
+    rows = (
+        db.query(models.FoodPreference)
+        .filter(models.FoodPreference.user_id == user_id)
+        .order_by(models.FoodPreference.category.asc(), models.FoodPreference.item_key.asc())
+        .all()
+    )
+    for row in rows:
+        if row.category not in CATEGORY_ITEMS:
+            continue
+        if row.item_key not in CATEGORY_ITEMS[row.category]:
+            continue
+        grouped.setdefault(row.category, []).append(row.item_key)
+    return grouped
+
+
+def _validate_preference_items(items: list[AdminPreferenceItem]) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    for item in items:
+        category = item.category.strip()
+        item_key = item.item_key.strip().lower()
+        if category not in CATEGORY_ITEMS:
+            raise HTTPException(status_code=422, detail=f"Unknown category '{category}'")
+        if item_key not in CATEGORY_ITEMS[category]:
+            raise HTTPException(status_code=422, detail=f"Unknown item_key '{item_key}' for category '{category}'")
+        result.append((category, item_key))
+    return result
+
+
+def _changed_preference_categories(
+    before: dict[str, list[str]],
+    after: dict[str, list[str]],
+) -> list[str]:
+    changed: list[str] = []
+    for category in sorted(set(before) | set(after)):
+        if sorted(before.get(category, [])) != sorted(after.get(category, [])):
+            changed.append(category)
+    return changed
+
+
+def _known_preference_labels() -> dict[str, dict[str, dict[str, str]]]:
+    return {
+        category: {
+            slug: {
+                "zh": FL.display_name(slug, "zh"),
+                "en": FL.display_name(slug, "en"),
+            }
+            for slug in slugs
+        }
+        for category, slugs in CATEGORY_ITEMS.items()
+    }
+
+
+def _food_library_payload() -> dict:
+    validation = {
+        bucket: {
+            "label_zh": FL.VALIDATION_BUCKET_LABELS[bucket]["zh"],
+            "label_en": FL.VALIDATION_BUCKET_LABELS[bucket]["en"],
+            "count": len(FL.slugs_by_validation_bucket(bucket)),
+            "is_blocking": bucket in getattr(nutrition_audit, "_BLOCKING_BUCKETS", set()),
+            "slugs": FL.slugs_by_validation_bucket(bucket),
+        }
+        for bucket in FL.VALIDATION_BUCKETS
+    }
+    execution = {
+        bucket: {
+            "label_zh": FL.EXECUTION_BUCKET_LABELS[bucket]["zh"],
+            "label_en": FL.EXECUTION_BUCKET_LABELS[bucket]["en"],
+            "count": len(FL.slugs_by_execution_bucket(bucket)),
+            "slugs": FL.slugs_by_execution_bucket(bucket),
+        }
+        for bucket in FL.EXECUTION_BUCKETS
+    }
+    foods = []
+    for slug, entry in sorted(FL.FOOD_LIBRARY.items()):
+        foods.append({
+            "slug": slug,
+            "name_zh": entry["zh"],
+            "name_en": entry["en"],
+            "primary_macro": entry["primary_macro"],
+            "kcal_per_100g": entry["kcal_per_100g"],
+            "protein_per_100g": entry["protein_per_100g"],
+            "carbs_per_100g": entry["carbs_per_100g"],
+            "fat_per_100g": entry["fat_per_100g"],
+            "validation_buckets": list(entry["validation_buckets"]),
+            "execution_buckets": list(entry["execution_buckets"]),
+            "micronutrient_roles": list(entry["micronutrient_roles"]),
+        })
+    return {
+        "total_foods": len(foods),
+        "validation_buckets": validation,
+        "execution_buckets": execution,
+        "foods": foods,
+    }
+
+
+def _app_log_path() -> Path:
+    backend_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        Path(os.getenv("LOG_DIR", "")) / "app.log" if os.getenv("LOG_DIR") else None,
+        backend_root / "logs" / "app.log",
+        Path.cwd() / "logs" / "app.log",
+        Path.cwd() / "backend" / "logs" / "app.log",
+    ]
+    for path in candidates:
+        if path and path.exists():
+            return path
+    return backend_root / "logs" / "app.log"
+
+
+def _sanitize_log_record(record: dict) -> dict:
+    allowed_keys = {
+        "ts", "lvl", "logger", "request_id", "journey_id", "ui_action",
+        "user_id", "event", "domain", "method", "path", "status",
+        "duration_ms", "kind", "action", "target_type", "target_id",
+        "error", "reason", "exc_class", "classified_count", "warning_count",
+        "feasibility", "variant",
+    }
+    out = {key: record.get(key) for key in allowed_keys if key in record}
+    msg = str(record.get("msg") or "")
+    lowered = msg.lower()
+    if any(token in lowered for token in ("raw response", "prompt", "password", "token", "authorization")):
+        msg = "Sensitive or raw payload hidden. Use request_id for backend debugging."
+    elif len(msg) > 220:
+        msg = msg[:220] + "..."
+    out["msg"] = msg
+    return out
+
 
 def _user_dict(u: models.User) -> dict:
     mem_level = u.membership.level if u.membership else "free"

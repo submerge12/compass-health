@@ -577,6 +577,12 @@ def suggest_for_day(
                 if revised:
                     candidates[slot["slot_key"]] = revised
 
+    for slot_key, cands in list(candidates.items()):
+        on_target = [c for c in cands if not c["drift"]["off_target"]]
+        if cands and not on_target:
+            warnings.append(f"{slot_key}: all candidates missed macro target")
+        candidates[slot_key] = on_target
+
     return {"date": date_str, "candidates": candidates, "warnings": warnings}
 
 

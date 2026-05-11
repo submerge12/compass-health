@@ -55,6 +55,34 @@ def slugs_from_recipe(recipe: models.Recipe) -> list[str]:
 
 # ── Public validator ──────────────────────────────────────────────────────────
 
+def _day_info_for_date(
+    db: Session,
+    user_id: int,
+    date: str,
+    week_skeleton: list[dict] | None,
+) -> dict | None:
+    if week_skeleton:
+        return next((d for d in week_skeleton if d.get("date") == date), None)
+
+    from services import menu_planner
+
+    user = db.query(models.User).filter_by(id=user_id).first()
+    if user is None:
+        return None
+    plan = menu_planner.week_plan(db, user)
+    for day in plan.get("nutrition_requirements", {}).get("days", []):
+        if day.get("date") == date:
+            day_type = day.get("day_type")
+            return {
+                "date": date,
+                "day_type": day_type,
+                "day_type_label_zh": day.get("day_type_label_zh", day_type),
+                "day_type_label_en": day.get("day_type_label_en", day_type),
+                "is_locked": day_type in {"red_meat_day", "deep_sea_fish_day"},
+            }
+    return None
+
+
 def validate_slot(
     db: Session,
     user_id: int,
@@ -134,6 +162,10 @@ def validate_slot(
             })
 
     # Day-type mismatch check.
+    if not week_skeleton and new_slugs:
+        inferred_day = _day_info_for_date(db, user_id, date, None)
+        if inferred_day:
+            week_skeleton = [inferred_day]
     if week_skeleton and new_slugs:
         day_info = next((d for d in week_skeleton if d.get("date") == date), None)
         if day_info and day_info.get("is_locked"):

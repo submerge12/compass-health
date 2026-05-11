@@ -110,9 +110,7 @@ const DashboardPage = {
     const checkedInToday = !!user.checked_in_today;
     const targetKcal = this._formatNumber(diet.calorie_target || diet.tdee || 0);
     const intakeKcal = this._formatNumber((diet.totals || {}).calories || 0);
-    const weightText = condition.weight_kg
-      ? `${this._formatNumber(condition.weight_kg, 1)} ${t('common.kg')}`
-      : '--';
+    const weightText = this._weightText(condition);
     const activityLabel = this._activityLabel(activity.activity_level);
     const dayMeals = ['breakfast', 'lunch', 'dinner'].map(mealType => {
       const entry = todayPlan && todayPlan.meals ? todayPlan.meals[mealType] : null;
@@ -299,7 +297,8 @@ const DashboardPage = {
       `;
     }
 
-    const rows = week.days.map(day => {
+    const weekDays = this._slidingWeekDays(week);
+    const rows = weekDays.map(day => {
       const date = new Date(`${day.date}T12:00:00`);
       const weekday = date.toLocaleDateString(I18n.lang === 'zh' ? 'zh-CN' : 'en-US', { weekday: 'short' });
       const mmdd = date.toLocaleDateString(I18n.lang === 'zh' ? 'zh-CN' : 'en-US', { month: 'numeric', day: 'numeric' });
@@ -393,7 +392,7 @@ const DashboardPage = {
       },
       {
         label: t('home.summary_weight'),
-        value: condition.weight_kg ? `${this._formatNumber(condition.weight_kg, 1)} ${t('common.kg')}` : '--',
+        value: this._weightText(condition),
         sub: this._conditionSubline(condition),
       },
     ];
@@ -656,7 +655,8 @@ const DashboardPage = {
 
   _todayPlan(week) {
     if (!week || !Array.isArray(week.days)) return null;
-    return week.days.find(day => day.date === week.today) || week.days[0] || null;
+    const days = this._slidingWeekDays(week);
+    return days.find(day => day.date === week.today) || days[0] || null;
   },
 
   _countArrangedMeals(week) {
@@ -664,6 +664,23 @@ const DashboardPage = {
     return week.days.reduce((sum, day) => {
       return sum + ['breakfast', 'lunch', 'dinner'].filter(mealType => day.meals && day.meals[mealType]).length;
     }, 0);
+  },
+
+  _slidingWeekDays(week) {
+    if (!week || !Array.isArray(week.days)) return [];
+    const today = week.today || this._todayDateString();
+    const sorted = [...week.days].sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+    const fromToday = sorted.filter(day => String(day.date || '') >= today);
+    const beforeToday = sorted.filter(day => String(day.date || '') < today);
+    return [...fromToday, ...beforeToday].slice(0, 7);
+  },
+
+  _todayDateString() {
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
   },
 
   _selectedPreferenceLabels(preferences) {
@@ -721,6 +738,13 @@ const DashboardPage = {
     }
     if (condition.mood) return I18n.t('home.summary_condition_logged');
     return I18n.t('home.summary_no_condition');
+  },
+
+  _weightText(condition) {
+    const weight = condition && (condition.weight_kg ?? condition.latest_weight_kg);
+    return weight != null
+      ? `${this._formatNumber(weight, 1)} ${I18n.t('common.kg')}`
+      : '--';
   },
 
   _progressPercent(actual, target) {

@@ -324,29 +324,24 @@ def build_context(
 
     weekday = datetime.strptime(date, "%Y-%m-%d").weekday()
 
-    recorded: list[MealSlot] = []
-    for row in db.query(DietLog).filter_by(user_id=user.id, date=date).all():
-        recorded.append(MealSlot(
-            date=date,
-            meal_type=row.meal_type,
-            status=SLOT_STATUS_RECORDED,
-            source_id=row.id,
-            totals=NutritionTarget(
-                calories=float(row.calories or 0),
-                protein =float(row.protein_g or 0),
-                carbs   =float(row.carbs_g or 0),
-                fat     =float(row.fat_g or 0),
-            ),
-        ))
-
-    # Collapse multiple DietLogs for the same meal slot into one priority winner
-    # (keeps the deduction math honest — otherwise a double-logged breakfast
-    # would subtract twice).
     recorded_by_slot: dict[str, MealSlot] = {}
-    for slot in recorded:
-        prior = recorded_by_slot.get(slot.meal_type)
-        if prior is None or (slot.source_id or 0) > (prior.source_id or 0):
-            recorded_by_slot[slot.meal_type] = slot
+    for row in db.query(DietLog).filter_by(user_id=user.id, date=date).all():
+        slot = recorded_by_slot.get(row.meal_type)
+        if slot is None:
+            slot = MealSlot(
+                date=date,
+                meal_type=row.meal_type,
+                status=SLOT_STATUS_RECORDED,
+                source_id=row.id,
+                totals=NutritionTarget(),
+            )
+            recorded_by_slot[row.meal_type] = slot
+        slot.source_id = max(slot.source_id or 0, row.id or 0)
+        slot.totals.calories += float(row.calories or 0)
+        slot.totals.protein += float(row.protein_g or 0)
+        slot.totals.carbs += float(row.carbs_g or 0)
+        slot.totals.fat += float(row.fat_g or 0)
+
     recorded = list(recorded_by_slot.values())
     recorded_meal_types = {s.meal_type for s in recorded}
 

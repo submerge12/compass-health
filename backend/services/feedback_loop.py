@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 import models
 from services import calorie as calorie_svc
+from services import local_dates
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -138,7 +139,7 @@ def weekly_review(db: Session, user: models.User, end_date: Optional[str] = None
     if end_date:
         end = _parse_date(end_date)
     else:
-        end = datetime.now(timezone.utc)
+        end = local_dates.app_now()
     dates = [(end - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
 
     targets = calorie_svc.build_daily_targets(db, user)

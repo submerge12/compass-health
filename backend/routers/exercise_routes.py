@@ -2,25 +2,33 @@ from datetime import datetime, timedelta, timezone
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 import models
 from auth import get_current_user
 from database import get_db
+from services import local_dates
 
 router = APIRouter(prefix="/api/exercise", tags=["exercise"])
 log = logging.getLogger("compass.app")
 
 
 class ExerciseLogRequest(BaseModel):
-    exercise_type: str
-    duration_min: int
-    calories_burned: int
-    notes: Optional[str] = None
-    date: Optional[str] = None
+    exercise_type: str = Field(..., min_length=1, max_length=64)
+    duration_min: int = Field(..., gt=0, le=600)
+    calories_burned: int = Field(..., ge=0, le=5000)
+    notes: Optional[str] = Field(default=None, max_length=500)
+    date: Optional[str] = Field(default=None, min_length=10, max_length=10)
+
+
+def _date_or_422(raw: Optional[str]) -> str:
+    try:
+        return local_dates.date_key_or_today(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 @router.post("/log")
@@ -29,7 +37,7 @@ def log_exercise(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    date = body.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date = _date_or_422(body.date)
     entry = models.ExerciseLog(
         user_id=current_user.id,
         date=date,
@@ -90,7 +98,7 @@ def get_exercise_today(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = local_dates.today_key()
     logs = (
         db.query(models.ExerciseLog)
         .filter(models.ExerciseLog.user_id == current_user.id, models.ExerciseLog.date == today)
@@ -116,14 +124,12 @@ def get_exercise_today(
 
 @router.get("/history")
 def get_exercise_history(
-    days: int = 7,
+    days: int = Query(7, ge=1, le=90),
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    today = datetime.now(timezone.utc)
     result = []
-    for i in range(days - 1, -1, -1):
-        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+    for d in local_dates.date_range_ending_today(days):
         logs = (
             db.query(models.ExerciseLog)
             .filter(models.ExerciseLog.user_id == current_user.id, models.ExerciseLog.date == d)

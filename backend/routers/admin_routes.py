@@ -226,6 +226,8 @@ def admin_approve_recipe(
     if not recipe:
         raise HTTPException(status_code=404, detail="Recipe not found")
     recipe.is_approved = True
+    if recipe.community_status == "pending":
+        recipe.community_status = "published"
     audit.record(
         db, admin, "recipe.approve",
         target_type="recipe", target_id=recipe.id,
@@ -249,6 +251,7 @@ def admin_delete_recipe(
         db.query(models.MealPlanEntry).filter(models.MealPlanEntry.recipe_id == recipe_id).count()
         + db.query(models.UserFixedMeal).filter(models.UserFixedMeal.recipe_id == recipe_id).count()
         + db.query(models.UserSavedRecipe).filter(models.UserSavedRecipe.recipe_id == recipe_id).count()
+        + db.query(models.RecipeTrialRating).filter(models.RecipeTrialRating.recipe_id == recipe_id).count()
     )
     if reference_count:
         raise HTTPException(
@@ -381,10 +384,13 @@ def admin_delete_user(
     db.query(models.PhysicalCondition).filter(models.PhysicalCondition.user_id == user_id).delete()
     db.query(models.CheckIn).filter(models.CheckIn.user_id == user_id).delete()
     db.query(models.LLMCallLog).filter(models.LLMCallLog.user_id == user_id).delete()
+    db.query(models.AssistantPendingAction).filter(models.AssistantPendingAction.user_id == user_id).delete()
+    db.query(models.UserNutritionMemory).filter(models.UserNutritionMemory.user_id == user_id).delete()
     db.query(models.DailyActivityPlan).filter(models.DailyActivityPlan.user_id == user_id).delete()
     db.query(models.MealPlanEntry).filter(models.MealPlanEntry.user_id == user_id).delete()
     db.query(models.UserSavedRecipe).filter(models.UserSavedRecipe.user_id == user_id).delete()
     db.query(models.UserFixedMeal).filter(models.UserFixedMeal.user_id == user_id).delete()
+    db.query(models.RecipeTrialRating).filter(models.RecipeTrialRating.user_id == user_id).delete()
     db.query(models.DailyMealPlanConfirmation).filter(
         models.DailyMealPlanConfirmation.user_id == user_id
     ).delete()
@@ -611,6 +617,7 @@ def admin_list_llm_quotas(
         q = q.filter(models.User.id == user_id)
     users = q.order_by(models.User.created_at.desc()).all()
     kinds = list(llm_quota.QUOTAS.keys())
+    usage_by_user_kind = _batch_llm_quota_usage(db, [user.id for user in users], kinds)
     return {
         "kinds": {
             kind: {
@@ -623,7 +630,7 @@ def admin_list_llm_quotas(
             {
                 "user": _user_dict(user),
                 "quotas": {
-                    kind: llm_quota.usage(db, user.id, kind)
+                    kind: usage_by_user_kind[(user.id, kind)]
                     for kind in kinds
                 },
             }
@@ -741,10 +748,11 @@ def admin_observability_events(
         return {"source": str(path), "items": []}
 
     items: list[dict] = []
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    for line in reversed(lines):
+    for line in _iter_lines_reverse(path):
         if len(items) >= limit:
             break
+        if not line.strip():
+            continue
         try:
             record = json.loads(line)
         except ValueError:
@@ -857,6 +865,73 @@ def _changed_preference_categories(
     return changed
 
 
+def _batch_llm_quota_usage(
+    db: Session,
+    user_ids: list[int],
+    kinds: list[str],
+) -> dict[tuple[int, str], dict]:
+    now = datetime.now(timezone.utc)
+    usage_by_key = {
+        (user_id, kind): _llm_quota_usage_payload(llm_quota.QUOTAS[kind], [])
+        for user_id in user_ids
+        for kind in kinds
+    }
+    if not user_ids or not kinds:
+        return usage_by_key
+
+    max_window_days = max(llm_quota.QUOTAS[kind].window_days for kind in kinds)
+    earliest_start = now - timedelta(days=max_window_days)
+    rows = (
+        db.query(
+            models.LLMCallLog.user_id,
+            models.LLMCallLog.kind,
+            models.LLMCallLog.called_at,
+        )
+        .filter(
+            models.LLMCallLog.user_id.in_(user_ids),
+            models.LLMCallLog.kind.in_(kinds),
+            models.LLMCallLog.called_at >= earliest_start,
+        )
+        .order_by(models.LLMCallLog.called_at.asc())
+        .all()
+    )
+
+    grouped: dict[tuple[int, str], list[datetime]] = {}
+    for row_user_id, kind, called_at in rows:
+        rule = llm_quota.QUOTAS.get(kind)
+        if rule is None:
+            continue
+        called_at = _as_utc(called_at)
+        if called_at < now - timedelta(days=rule.window_days):
+            continue
+        grouped.setdefault((row_user_id, kind), []).append(called_at)
+
+    for key, call_times in grouped.items():
+        usage_by_key[key] = _llm_quota_usage_payload(llm_quota.QUOTAS[key[1]], call_times)
+    return usage_by_key
+
+
+def _llm_quota_usage_payload(rule: llm_quota.QuotaRule, call_times: list[datetime]) -> dict:
+    used = len(call_times)
+    remaining = max(0, rule.limit - used)
+    next_refresh = None
+    if call_times:
+        next_refresh = call_times[0] + timedelta(days=rule.window_days)
+    return {
+        "limit": rule.limit,
+        "used": used,
+        "remaining": remaining,
+        "window_days": rule.window_days,
+        "next_refresh_at": next_refresh.isoformat() if next_refresh else None,
+    }
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _known_preference_labels() -> dict[str, dict[str, dict[str, str]]]:
     return {
         category: {
@@ -927,6 +1002,25 @@ def _app_log_path() -> Path:
     return backend_root / "logs" / "app.log"
 
 
+def _iter_lines_reverse(path: Path, chunk_size: int = 64 * 1024):
+    pending = b""
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        position = fh.tell()
+        while position > 0:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            fh.seek(position)
+            chunk = fh.read(read_size)
+            parts = chunk.split(b"\n")
+            parts[-1] += pending
+            pending = parts[0]
+            for raw_line in reversed(parts[1:]):
+                yield raw_line.decode("utf-8", errors="replace")
+        if pending:
+            yield pending.decode("utf-8", errors="replace")
+
+
 def _sanitize_log_record(record: dict) -> dict:
     allowed_keys = {
         "ts", "lvl", "logger", "request_id", "journey_id", "ui_action",
@@ -982,4 +1076,9 @@ def _recipe_dict(r: models.Recipe) -> dict:
         "is_approved": r.is_approved,
         "submitted_by": r.submitted_by,
         "created_at": r.created_at.isoformat() if r.created_at else None,
+        "community_status": r.community_status,
+        "low_fat_score": r.low_fat_score,
+        "low_fat_grade": r.low_fat_grade,
+        "community_rating_avg": r.community_rating_avg,
+        "community_rating_count": r.community_rating_count or 0,
     }

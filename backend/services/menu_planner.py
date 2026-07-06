@@ -746,6 +746,7 @@ _BREAKFAST_POOL_SIZE   = 6
 _MAIN_POOL_SIZE        = 24   # lunch + dinner combined (user decides assignment)
 _SUPPLEMENT_BREAKFAST_POOL_SIZE = 2
 _SUPPLEMENT_MAIN_POOL_SIZE = 8
+_MAIN_COMBINATION_CANDIDATE_LIMIT = 12
 # Per the design spec: no ingredient may appear in more than floor(pool_size/5)
 # dishes within its type group (breakfast or main).
 # For main pool of 24: floor(24/5) = 4  →  ≤4/24 ≈ 17 %
@@ -782,9 +783,13 @@ def _diversity_ok(
     return True
 
 
-def _sketch_day_type_affinities(parts: list[dict]) -> list[str]:
-    """Return which day types this dish is particularly well suited for."""
-    slugs_in_dish = {p["slug"] for p in parts}
+def day_type_affinities_for_slugs(slugs: list[str]) -> list[str]:
+    """Return which day types this ingredient set is particularly suited for."""
+    slugs_in_dish = {
+        str(slug).strip()
+        for slug in slugs
+        if slug is not None and str(slug).strip()
+    }
     result: list[str] = []
     for day_type, preferred_buckets in _DAY_TYPE_AFFINITY.items():
         if not preferred_buckets:
@@ -797,12 +802,25 @@ def _sketch_day_type_affinities(parts: list[dict]) -> list[str]:
     return result
 
 
-def _pool_source_label(source: str) -> str:
+def _sketch_day_type_affinities(parts: list[dict]) -> list[str]:
+    """Return which day types this dish is particularly well suited for."""
+    return day_type_affinities_for_slugs([
+        p.get("slug")
+        for p in parts
+        if isinstance(p, dict) and p.get("slug")
+    ])
+
+
+def pool_source_label(source: str) -> str:
     return {
         "generated": "Generated",
         "recipe_library": "Recipe library",
         "supplement": "Supplement",
     }.get(source, source or "Generated")
+
+
+def _pool_source_label(source: str) -> str:
+    return pool_source_label(source)
 
 
 def _stamp_pool_source(dish: dict, source: str) -> dict:
@@ -893,6 +911,8 @@ def generate_dish_pool(db: Session, user: models.User, variant: int = 0) -> dict
     today = local_dates.app_now()
     week_rows = _calendar_for_week(db, user.id, today, classification_full)
     required_slot_counts, _ = _week_slot_requirements(db, user, week_rows, ignore_planned=True)
+    requires_breakfast_pool = required_slot_counts["breakfast"] > 0
+    requires_main_pool = (required_slot_counts["lunch"] + required_slot_counts["dinner"]) > 0
     week_skeleton = [
         {
             "date": row["date"],
@@ -917,7 +937,7 @@ def generate_dish_pool(db: Session, user: models.User, variant: int = 0) -> dict
     breakfast_rotation_offset = variant % len(bkfst_protein_rotation)
     bkfst_attempts = 0
 
-    while len(breakfast_pool) < _BREAKFAST_POOL_SIZE and bkfst_attempts < 40:
+    while requires_breakfast_pool and len(breakfast_pool) < _BREAKFAST_POOL_SIZE and bkfst_attempts < 40:
         bkfst_attempts += 1
         # Vary which protein bucket we draw from
         rotation_idx = (len(breakfast_pool) + bkfst_attempts + breakfast_rotation_offset) % len(bkfst_protein_rotation)
@@ -962,7 +982,7 @@ def generate_dish_pool(db: Session, user: models.User, variant: int = 0) -> dict
     day_type_offset = variant % len(day_type_cycle)
     main_attempts = 0
 
-    while len(main_pool) < _MAIN_POOL_SIZE and main_attempts < 80:
+    while requires_main_pool and len(main_pool) < _MAIN_POOL_SIZE and main_attempts < 80:
         main_attempts += 1
         day_type = day_type_cycle[(main_attempts + day_type_offset) % len(day_type_cycle)]
         # Alternate lunch and dinner targets to vary macro proportions
@@ -1002,8 +1022,8 @@ def generate_dish_pool(db: Session, user: models.User, variant: int = 0) -> dict
         "variant": variant,
         "week_skeleton": week_skeleton,
         "required_slot_counts": required_slot_counts,
-        "requires_breakfast_pool": required_slot_counts["breakfast"] > 0,
-        "requires_main_pool": (required_slot_counts["lunch"] + required_slot_counts["dinner"]) > 0,
+        "requires_breakfast_pool": requires_breakfast_pool,
+        "requires_main_pool": requires_main_pool,
         "breakfast_pool": breakfast_pool,
         "main_pool": main_pool,
     }
@@ -1127,6 +1147,8 @@ def generate_supplement_pool(
     missing_roles: list[str] | None = None,
     required_buckets: list[str] | None = None,
     variant: int = 0,
+    requires_breakfast_pool: bool = True,
+    requires_main_pool: bool = True,
 ) -> dict:
     selected_food_slugs = selected_food_slugs or []
     missing_roles = missing_roles or []
@@ -1202,8 +1224,10 @@ def generate_supplement_pool(
     return {
         "feasibility": "ok",
         "variant": variant,
-        "breakfast_pool": build_group("breakfast", _SUPPLEMENT_BREAKFAST_POOL_SIZE),
-        "main_pool": build_group("main", _SUPPLEMENT_MAIN_POOL_SIZE),
+        "breakfast_pool": build_group("breakfast", _SUPPLEMENT_BREAKFAST_POOL_SIZE) if requires_breakfast_pool else [],
+        "main_pool": build_group("main", _SUPPLEMENT_MAIN_POOL_SIZE) if requires_main_pool else [],
+        "requires_breakfast_pool": requires_breakfast_pool,
+        "requires_main_pool": requires_main_pool,
         "warnings": [],
     }
 
@@ -1549,16 +1573,153 @@ def _normalize_selected_dish(
     }
 
 
-def _main_combinations(main_dishes: list[dict], slots_needed: int) -> list[tuple[dict, ...]]:
+def _target_attr(target: object, attr: str) -> float:
+    try:
+        return float(getattr(target, attr, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _macro_total(dish: dict, key: str) -> float:
+    totals = dish.get("totals") if isinstance(dish, dict) else {}
+    if not isinstance(totals, dict):
+        return 0.0
+    try:
+        return float(totals.get(key, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _dish_bucket_set(dish: dict) -> set[str]:
+    raw_bucket_set = dish.get("bucket_set", set())
+    if isinstance(raw_bucket_set, set):
+        return raw_bucket_set
+    if isinstance(raw_bucket_set, (list, tuple)):
+        return {str(bucket) for bucket in raw_bucket_set if str(bucket).strip()}
+    return set()
+
+
+def _main_dish_individual_score(
+    dish: dict,
+    *,
+    remaining_target: object,
+    slots_needed: int,
+    day_type: str,
+    dish_usage: Counter,
+    ingredient_usage: Counter,
+    nutrient_progress: dict[str, float],
+    weekly_targets: dict[str, float],
+) -> float:
+    slot_count = max(1, slots_needed)
+    target_kcal = _target_attr(remaining_target, "calories") / slot_count
+    target_protein = _target_attr(remaining_target, "protein") / slot_count
+    target_carbs = _target_attr(remaining_target, "carbs") / slot_count
+    target_fat = _target_attr(remaining_target, "fat") / slot_count
+
+    score = 0.0
+    score += abs(_macro_total(dish, "kcal") - target_kcal)
+    score += abs(_macro_total(dish, "protein_g") - target_protein) * 8.0
+    score += abs(_macro_total(dish, "carbs_g") - target_carbs) * 3.5
+    score += abs(_macro_total(dish, "fat_g") - target_fat) * 5.0
+
+    signature = dish.get("signature")
+    if signature is not None:
+        score += dish_usage[signature] * 60.0
+    for slug in dish.get("ingredient_slugs", []):
+        score += max(0, ingredient_usage[slug] - 1) * 10.0
+
+    required_buckets = _required_buckets_for_day(day_type)
+    if required_buckets:
+        if not (_dish_bucket_set(dish) & required_buckets):
+            score += 100000.0
+    elif day_type in dish.get("day_type_affinities", []):
+        score -= 10.0
+
+    nutrient_bonus = 0.0
+    nutrients = dish.get("nutrients", {})
+    if isinstance(nutrients, dict):
+        for role, target in weekly_targets.items():
+            if target <= 0:
+                continue
+            remaining = max(0.0, target - nutrient_progress.get(role, 0.0))
+            if remaining <= 0:
+                continue
+            contribution = float(nutrients.get(role, 0.0) or 0.0)
+            nutrient_bonus += min(contribution, remaining) / target
+    score -= nutrient_bonus * 300.0
+    return score
+
+
+def _main_combination_candidates(
+    main_dishes: list[dict],
+    slots_needed: int,
+    *,
+    remaining_target: object | None,
+    day_type: str,
+    dish_usage: Counter,
+    ingredient_usage: Counter,
+    nutrient_progress: dict[str, float],
+    weekly_targets: dict[str, float],
+) -> list[dict]:
+    if slots_needed <= 1 or len(main_dishes) <= _MAIN_COMBINATION_CANDIDATE_LIMIT:
+        return main_dishes
+    if remaining_target is None:
+        return main_dishes[:_MAIN_COMBINATION_CANDIDATE_LIMIT]
+    scored = [
+        (
+            _main_dish_individual_score(
+                dish,
+                remaining_target=remaining_target,
+                slots_needed=slots_needed,
+                day_type=day_type,
+                dish_usage=dish_usage,
+                ingredient_usage=ingredient_usage,
+                nutrient_progress=nutrient_progress,
+                weekly_targets=weekly_targets,
+            ),
+            idx,
+            dish,
+        )
+        for idx, dish in enumerate(main_dishes)
+    ]
+    return [
+        dish
+        for _score, _idx, dish in sorted(scored, key=lambda item: (item[0], item[1]))[
+            :_MAIN_COMBINATION_CANDIDATE_LIMIT
+        ]
+    ]
+
+
+def _main_combinations(
+    main_dishes: list[dict],
+    slots_needed: int,
+    *,
+    remaining_target: object | None = None,
+    day_type: str = "",
+    dish_usage: Optional[Counter] = None,
+    ingredient_usage: Optional[Counter] = None,
+    nutrient_progress: Optional[dict[str, float]] = None,
+    weekly_targets: Optional[dict[str, float]] = None,
+) -> list[tuple[dict, ...]]:
     if slots_needed <= 0:
         return [tuple()]
     if not main_dishes:
         return []
+    candidates = _main_combination_candidates(
+        main_dishes,
+        slots_needed,
+        remaining_target=remaining_target,
+        day_type=day_type,
+        dish_usage=dish_usage or Counter(),
+        ingredient_usage=ingredient_usage or Counter(),
+        nutrient_progress=nutrient_progress or {},
+        weekly_targets=weekly_targets or {},
+    )
     if slots_needed == 1:
-        return [(dish,) for dish in main_dishes]
-    if len(main_dishes) == 1:
-        return [(main_dishes[0], main_dishes[0])]
-    return list(product(main_dishes, repeat=slots_needed))
+        return [(dish,) for dish in candidates]
+    if len(candidates) == 1:
+        return [(candidates[0],) * slots_needed]
+    return list(product(candidates, repeat=slots_needed))
 
 
 def _assign_main_slots(main_slots: list[str], picks: tuple[dict, ...]) -> dict[str, dict]:
@@ -1813,7 +1974,16 @@ def arrange_selected_pool(
         main_slots = [slot for slot in empty_slots if slot in ("lunch", "dinner")]
 
         breakfast_options = breakfast_pool if breakfast_needed else [None]
-        main_options = _main_combinations(main_pool, len(main_slots))
+        main_options = _main_combinations(
+            main_pool,
+            len(main_slots),
+            remaining_target=ctx.remaining_target,
+            day_type=row["day_type"],
+            dish_usage=dish_usage,
+            ingredient_usage=ingredient_usage,
+            nutrient_progress=weekly_micro_actual,
+            weekly_targets=weekly_micro_targets,
+        )
         if breakfast_needed and not breakfast_options:
             return {
                 "error": "breakfast_pool_empty",

@@ -3,6 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import os
 
+from fastapi import HTTPException
+
+
+INVALID_DATE_DETAIL = "date must be YYYY-MM-DD"
+
 
 def _configured_timezone() -> timezone:
     raw = os.getenv("APP_TIMEZONE_OFFSET_HOURS", "8").strip()
@@ -36,9 +41,9 @@ def validate_date_key(raw: str) -> str:
     try:
         parsed = datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError as exc:
-        raise ValueError("date must be YYYY-MM-DD") from exc
+        raise ValueError(INVALID_DATE_DETAIL) from exc
     if parsed.strftime("%Y-%m-%d") != value:
-        raise ValueError("date must be YYYY-MM-DD")
+        raise ValueError(INVALID_DATE_DETAIL)
     return value
 
 
@@ -46,6 +51,13 @@ def date_key_or_today(raw: str | None, now: datetime | None = None) -> str:
     if raw is None or str(raw).strip() == "":
         return today_key(now)
     return validate_date_key(str(raw))
+
+
+def date_or_422(raw: str | None) -> str:
+    try:
+        return date_key_or_today(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def date_range_starting_today(days: int, now: datetime | None = None) -> list[str]:

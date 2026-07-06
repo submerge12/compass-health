@@ -206,6 +206,37 @@ class Recipe(Base):
     # sites read `ingredients_json` (planned for a later phase).
     ingredients_json = Column(Text, nullable=True)
 
+    # Community / forum layer for user-submitted fat-loss recipes.
+    community_status = Column(String, nullable=True)  # published / hidden / null
+    low_fat_score = Column(Integer, nullable=True)
+    low_fat_grade = Column(String, nullable=True)
+    low_fat_assessment_json = Column(Text, nullable=True)
+    low_fat_assessed_at = Column(DateTime, nullable=True)
+    community_rating_avg = Column(Float, nullable=True)
+    community_rating_count = Column(Integer, nullable=False, default=0, server_default="0")
+
+
+class RecipeTrialRating(Base):
+    __tablename__ = "recipe_trial_ratings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    recipe_id = Column(Integer, ForeignKey("recipes.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    rating = Column(Integer, nullable=False)              # 1..5 after trying
+    satiety_score = Column(Integer, nullable=True)        # 1..5
+    difficulty_score = Column(Integer, nullable=True)     # 1..5, lower is easier in UI copy
+    would_cook_again = Column(Boolean, nullable=True)
+    feedback = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    recipe = relationship("Recipe")
+    user = relationship("User")
+
+    __table_args__ = (
+        UniqueConstraint("recipe_id", "user_id", name="uq_recipe_trial_rating"),
+    )
+
 
 class MealPlanEntry(Base):
     __tablename__ = "meal_plan_entries"
@@ -309,6 +340,28 @@ class UserFixedMeal(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "weekday", "meal_type", name="uq_user_fixed_meal"),
     )
+
+
+class UserNutritionMemory(Base):
+    __tablename__ = "user_nutrition_memory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
+    memory_json = Column(Text, nullable=False, default="{}")
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AssistantPendingAction(Base):
+    __tablename__ = "assistant_pending_actions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    action_type = Column(String, nullable=False, index=True)
+    payload_json = Column(Text, nullable=False)
+    summary = Column(Text, nullable=True)
+    status = Column(String, nullable=False, default="pending", server_default="pending", index=True)
+    created_at = Column(DateTime, default=utcnow)
+    executed_at = Column(DateTime, nullable=True)
 
 
 class DailyMealPlanConfirmation(Base):

@@ -9,7 +9,23 @@ backend/compass.db
 
 # Logs / backups
 backend/logs/
+logs/
 backups/
+
+# Agent/test working dirs
+.ai/
+.codex-test-tmp/
+.playwright-mcp/
+
+# Nutrition source data (copyrighted / rebuildable via build_integrated_nutrition_db.py)
+中国食物成分表.xlsx
+integrated_food_nutrition.csv
+per_source_food_nutrition/
+
+# Personal seed data (local only)
+seed_my_ingredients.csv
+seed_my_natural_units.csv
+seed_my_seasonings.csv
 
 # Local tooling / workspace metadata
 .claude/

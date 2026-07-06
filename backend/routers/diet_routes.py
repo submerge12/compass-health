@@ -10,6 +10,7 @@ import models
 from auth import get_current_user
 from database import get_db
 from services import calorie, deepseek, llm_quota, local_dates, planning_context as pc
+from services.local_dates import date_or_422
 
 router = APIRouter(prefix="/api/diet", tags=["diet"])
 app_log = logging.getLogger("compass.app")
@@ -30,13 +31,6 @@ class DietIngredientRequest(BaseModel):
     meal_type: DietMealType
     ingredients: str = Field(..., min_length=1, max_length=4000)        # raw ingredient list, one per line
     date: Optional[str] = Field(default=None, min_length=10, max_length=10)
-
-
-def _date_or_422(raw: Optional[str]) -> str:
-    try:
-        return local_dates.date_key_or_today(raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
 
 
 def _refund_diet_estimate_quota(
@@ -266,7 +260,7 @@ def log_diet(
 ):
     if body.meal_type not in {"breakfast", "lunch", "dinner", "snack"}:
         raise HTTPException(status_code=422, detail="Invalid meal_type")
-    date = _date_or_422(body.date)
+    date = date_or_422(body.date)
     entry = models.DietLog(
         user_id=current_user.id,
         date=date,
@@ -315,7 +309,7 @@ def log_diet_ingredients(
     if body.meal_type not in {"breakfast", "lunch", "dinner", "snack"}:
         raise HTTPException(status_code=422, detail="Invalid meal_type")
 
-    date_str = _date_or_422(body.date)
+    date_str = date_or_422(body.date)
     meal_labels = {
         "breakfast": "早餐",
         "lunch": "午餐",

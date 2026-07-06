@@ -18,6 +18,8 @@ def clean_meal_plan_tables(client):
     inspector = inspect(db.bind)
     for table in (
         models.AdminAuditLog,
+        models.AssistantPendingAction,
+        models.UserNutritionMemory,
         models.LLMCallLog,
         models.DailyMealPlanConfirmation,
         models.UserSavedRecipe,
@@ -235,6 +237,26 @@ def _pool_name_used(username: str) -> int:
     db = SessionLocal()
     try:
         return llm_quota.usage(db, _user_id(username), llm_quota.POOL_NAME)["used"]
+    finally:
+        db.close()
+
+
+def _exhaust_pool_name_quota(username: str) -> None:
+    from database import SessionLocal
+    import models
+    from services import llm_quota
+
+    db = SessionLocal()
+    try:
+        user = db.query(models.User).filter(models.User.username == username).one()
+        now = datetime.now(timezone.utc)
+        for idx in range(llm_quota.QUOTAS[llm_quota.POOL_NAME].limit):
+            db.add(models.LLMCallLog(
+                user_id=user.id,
+                kind=llm_quota.POOL_NAME,
+                called_at=now - timedelta(minutes=idx),
+            ))
+        db.commit()
     finally:
         db.close()
 
@@ -800,7 +822,85 @@ def test_pool_marks_breakfast_optional_when_breakfast_is_fixed_all_week(client):
     body = pool_resp.json()
     assert body["required_slot_counts"]["breakfast"] == 0
     assert body["requires_breakfast_pool"] is False
+    assert body["breakfast_pool"] == []
     assert body["requires_main_pool"] is True
+
+
+def test_named_pool_omits_breakfast_when_breakfast_is_fixed_all_week(client, monkeypatch):
+    auth = register(client, "named_pool_fixed_breakfast_user")
+    _seed_profile_and_library("named_pool_fixed_breakfast_user")
+    _seed_everyday_fixed_breakfast("named_pool_fixed_breakfast_user")
+    headers = _auth_headers(auth["access_token"])
+
+    def fake_suggest_pool_names(pool, language="zh", batch_size=None):
+        assert pool
+        assert all(sketch.get("meal_type") != "breakfast" for sketch in pool)
+        named = []
+        for idx, sketch in enumerate(pool):
+            parts = sketch.get("parts") or sketch.get("ingredients") or []
+            named.append({
+                **sketch,
+                "name": f"Generated main {idx}",
+                "ingredients": [
+                    {"slug": item["slug"], "grams": item["grams"]}
+                    for item in parts
+                ],
+                "seasonings": [],
+                "method_steps": "1. Cook and serve",
+            })
+        return {"named_dishes": named, "warnings": []}
+
+    from services import recipe_suggester
+
+    monkeypatch.setattr(recipe_suggester, "suggest_pool_names", fake_suggest_pool_names)
+
+    named_resp = client.post("/api/meal-plan/pool/name", headers=headers)
+    assert named_resp.status_code == 200, named_resp.text
+    body = named_resp.json()
+    assert body["required_slot_counts"]["breakfast"] == 0
+    assert body["requires_breakfast_pool"] is False
+    assert body["breakfast_dishes"] == []
+    assert body["main_dishes"]
+
+
+def test_named_pool_with_no_generated_sketches_ignores_exhausted_pool_name_quota(client, monkeypatch):
+    auth = register(client, "named_pool_no_sketch_quota_user")
+    headers = _auth_headers(auth["access_token"])
+    _exhaust_pool_name_quota("named_pool_no_sketch_quota_user")
+
+    def fake_generate_dish_pool(db, user, variant=0):
+        return {
+            "feasibility": "ok",
+            "variant": variant,
+            "week_skeleton": [],
+            "required_slot_counts": {"breakfast": 0, "lunch": 0, "dinner": 0},
+            "requires_breakfast_pool": False,
+            "requires_main_pool": False,
+            "breakfast_pool": [],
+            "main_pool": [],
+        }
+
+    def fail_suggest_pool_names(pool, language="zh", batch_size=None):
+        raise AssertionError("no generated sketches should not call LLM naming")
+
+    from services import menu_planner, recipe_suggester
+
+    monkeypatch.setattr(menu_planner, "generate_dish_pool", fake_generate_dish_pool)
+    monkeypatch.setattr(recipe_suggester, "suggest_pool_names", fail_suggest_pool_names)
+
+    before = _pool_name_used("named_pool_no_sketch_quota_user")
+    response = client.post("/api/meal-plan/pool/name", headers=headers)
+    after = _pool_name_used("named_pool_no_sketch_quota_user")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["breakfast_dishes"] == []
+    assert body["main_dishes"] == []
+    assert body["requires_breakfast_pool"] is False
+    assert body["requires_main_pool"] is False
+    assert body["llm_quota"]["kind"] == "pool_name"
+    assert body["llm_quota"]["used"] == before
+    assert after == before
 
 
 def test_arrange_allows_empty_breakfast_pool_when_breakfast_is_fixed_all_week(client):

@@ -79,8 +79,11 @@ def clean_db(app):
     # Order matters — children first.
     for table in (
         models.AdminAuditLog,
+        models.AssistantPendingAction,
+        models.UserNutritionMemory,
         models.LLMCallLog,
         models.DailyMealPlanConfirmation,
+        models.RecipeTrialRating,
         models.UserSavedRecipe,
         models.UserFixedMeal,
         models.MealPlanEntry,

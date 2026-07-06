@@ -141,18 +141,10 @@ _LIBRARY_BREAKFAST_LIMIT = 8
 _LIBRARY_MAIN_LIMIT = 24
 
 
-def _pool_source_label(source: str) -> str:
-    return {
-        "generated": "Generated",
-        "recipe_library": "Recipe library",
-        "supplement": "Supplement",
-    }.get(source, source or "Generated")
-
-
 def _stamp_pool_dish(dish: dict, source: str = "generated") -> dict:
     stamped = dict(dish or {})
     stamped.setdefault("source", source)
-    stamped.setdefault("source_label", _pool_source_label(stamped["source"]))
+    stamped.setdefault("source_label", menu_planner.pool_source_label(stamped["source"]))
     if "dish_id" not in stamped and stamped.get("sketch_id") is not None:
         stamped["dish_id"] = str(stamped["sketch_id"])
     return stamped
@@ -308,24 +300,6 @@ def _recipe_pool_groups(recipe: models.Recipe) -> set[str]:
     return groups
 
 
-def _day_type_affinities_for_slugs(slugs: list[str]) -> list[str]:
-    bucket_set = {
-        bucket
-        for slug in slugs
-        for bucket in FL.FOOD_LIBRARY.get(slug, {}).get("execution_buckets", [])
-    }
-    affinities: list[str] = []
-    if "red_meat" in bucket_set:
-        affinities.append("red_meat_day")
-    if "deep_sea_fish" in bucket_set:
-        affinities.append("deep_sea_fish_day")
-    if "slow_carb_staple" in bucket_set:
-        affinities.append("low_activity")
-    if "fast_carb_staple" in bucket_set:
-        affinities.append("high_activity")
-    return affinities
-
-
 def _recipe_to_pool_candidate(recipe: models.Recipe, group: str, ingredients: list[dict]) -> dict:
     slugs = sorted({item["slug"] for item in ingredients})
     return {
@@ -333,7 +307,7 @@ def _recipe_to_pool_candidate(recipe: models.Recipe, group: str, ingredients: li
         "recipe_id": recipe.id,
         "meal_type": group,
         "source": "recipe_library",
-        "source_label": _pool_source_label("recipe_library"),
+        "source_label": menu_planner.pool_source_label("recipe_library"),
         "name": recipe.name,
         "ingredients": ingredients,
         "totals": {
@@ -343,7 +317,7 @@ def _recipe_to_pool_candidate(recipe: models.Recipe, group: str, ingredients: li
             "fat_g": float(recipe.fat_g or 0),
         },
         "ingredient_slugs": slugs,
-        "day_type_affinities": _day_type_affinities_for_slugs(slugs),
+        "day_type_affinities": menu_planner.day_type_affinities_for_slugs(slugs),
         "method_steps": recipe.steps or "",
         "seasonings": [],
     }
@@ -390,8 +364,14 @@ def _visible_recipe_pool_candidates(db: Session, user: models.User) -> dict[str,
 def _merge_library_candidates(pool: dict, db: Session, user: models.User) -> dict:
     merged = _stamp_generated_pool(pool)
     library = _visible_recipe_pool_candidates(db, user)
-    merged["breakfast_pool"] = _dedupe_pool_dishes(merged.get("breakfast_pool", []) + library["breakfast"])
-    merged["main_pool"] = _dedupe_pool_dishes(merged.get("main_pool", []) + library["main"])
+    requires_breakfast_pool = bool(merged.get("requires_breakfast_pool", True))
+    requires_main_pool = bool(merged.get("requires_main_pool", True))
+    merged["breakfast_pool"] = _dedupe_pool_dishes(
+        merged.get("breakfast_pool", []) + library["breakfast"]
+    ) if requires_breakfast_pool else []
+    merged["main_pool"] = _dedupe_pool_dishes(
+        merged.get("main_pool", []) + library["main"]
+    ) if requires_main_pool else []
     return merged
 
 
@@ -455,21 +435,6 @@ def name_dish_pool(
       warnings          — soft notes (unnamed sketches, batch failures)
       llm_quota         — current usage after this call
     """
-    try:
-        llm_quota.check(db, current_user.id, llm_quota.POOL_NAME)
-    except llm_quota.LLMQuotaExceeded as exc:
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error": "quota_exhausted",
-                "kind": llm_quota.POOL_NAME,
-                "message_zh": "本周菜谱命名次数已用完。",
-                "message_en": "Pool naming quota exhausted for this week.",
-                "next_refresh_at": exc.next_refresh_at.isoformat()
-                    if getattr(exc, "next_refresh_at", None) else None,
-            },
-        )
-
     pool_data = menu_planner.generate_dish_pool(db, current_user, variant=variant)
     if "message_zh" in pool_data:
         raise HTTPException(
@@ -477,8 +442,29 @@ def name_dish_pool(
             detail=_closed_loop_error_detail(pool_data),
         )
 
-    all_sketches = pool_data.get("breakfast_pool", []) + pool_data.get("main_pool", [])
+    requires_breakfast_pool = bool(pool_data.get("requires_breakfast_pool", True))
+    requires_main_pool = bool(pool_data.get("requires_main_pool", True))
+    breakfast_sketches = pool_data.get("breakfast_pool", []) if requires_breakfast_pool else []
+    main_sketches = pool_data.get("main_pool", []) if requires_main_pool else []
+    all_sketches = breakfast_sketches + main_sketches
     language = current_user.language or "zh"
+    library = _visible_recipe_pool_candidates(db, current_user)
+    library_breakfast = library["breakfast"] if requires_breakfast_pool else []
+    library_main = library["main"] if requires_main_pool else []
+
+    if not all_sketches:
+        quota_usage = llm_quota.usage(db, current_user.id, llm_quota.POOL_NAME)
+        return {
+            "breakfast_dishes": _dedupe_pool_dishes(library_breakfast),
+            "main_dishes": _dedupe_pool_dishes(library_main),
+            "variant": variant,
+            "week_skeleton": pool_data.get("week_skeleton", []),
+            "required_slot_counts": pool_data.get("required_slot_counts", {}),
+            "requires_breakfast_pool": requires_breakfast_pool,
+            "requires_main_pool": requires_main_pool,
+            "warnings": [],
+            "llm_quota": {**quota_usage, "kind": llm_quota.POOL_NAME},
+        }
 
     pool_quota_call_id: Optional[int] = None
     try:
@@ -518,12 +504,11 @@ def name_dish_pool(
             db.commit()
 
     quota_usage = llm_quota.usage(db, current_user.id, llm_quota.POOL_NAME)
-    library = _visible_recipe_pool_candidates(db, current_user)
     breakfast_dishes = _dedupe_pool_dishes(
-        [d for d in named_dishes if d["meal_type"] == "breakfast"] + library["breakfast"]
+        [d for d in named_dishes if d["meal_type"] == "breakfast"] + library_breakfast
     )
     main_dishes = _dedupe_pool_dishes(
-        [d for d in named_dishes if d["meal_type"] == "main"] + library["main"]
+        [d for d in named_dishes if d["meal_type"] == "main"] + library_main
     )
     return {
         "breakfast_dishes": breakfast_dishes,
@@ -531,8 +516,8 @@ def name_dish_pool(
         "variant":          variant,
         "week_skeleton":    pool_data.get("week_skeleton", []),
         "required_slot_counts": pool_data.get("required_slot_counts", {}),
-        "requires_breakfast_pool": bool(pool_data.get("requires_breakfast_pool", True)),
-        "requires_main_pool": bool(pool_data.get("requires_main_pool", True)),
+        "requires_breakfast_pool": requires_breakfast_pool,
+        "requires_main_pool": requires_main_pool,
         "warnings":         result.get("warnings", []),
         "llm_quota":        {**quota_usage, "kind": llm_quota.POOL_NAME},
     }
@@ -544,11 +529,18 @@ class PoolSupplementIssue(BaseModel):
     required_buckets: list[str] = Field(default_factory=list, max_length=20)
 
 
+class PoolCurrentPool(BaseModel):
+    required_slot_counts: dict[str, int] = Field(default_factory=dict)
+    requires_breakfast_pool: Optional[bool] = None
+    requires_main_pool: Optional[bool] = None
+
+
 class PoolSupplementRequest(BaseModel):
     selected_food_slugs: list[str] = Field(default_factory=list, max_length=30)
     issue: Optional[PoolSupplementIssue] = None
     missing_roles: list[str] = Field(default_factory=list, max_length=20)
     required_buckets: list[str] = Field(default_factory=list, max_length=20)
+    current_pool: Optional[PoolCurrentPool] = None
     variant: int = Field(default=0, ge=0, le=1000)
 
 
@@ -561,6 +553,19 @@ def supplement_dish_pool(
     issue = body.issue or PoolSupplementIssue()
     missing_roles = body.missing_roles or issue.missing_roles or []
     required_buckets = body.required_buckets or issue.required_buckets or []
+    current_counts = body.current_pool.required_slot_counts if body.current_pool else {}
+    breakfast_required_count = int(current_counts.get("breakfast", 1) or 0)
+    main_required_count = int(current_counts.get("lunch", 1) or 0) + int(current_counts.get("dinner", 1) or 0)
+    requires_breakfast_pool = (
+        bool(body.current_pool.requires_breakfast_pool)
+        if body.current_pool and body.current_pool.requires_breakfast_pool is not None
+        else breakfast_required_count > 0
+    )
+    requires_main_pool = (
+        bool(body.current_pool.requires_main_pool)
+        if body.current_pool and body.current_pool.requires_main_pool is not None
+        else main_required_count > 0
+    )
     pool_data = menu_planner.generate_supplement_pool(
         db,
         current_user,
@@ -568,6 +573,8 @@ def supplement_dish_pool(
         missing_roles=missing_roles,
         required_buckets=required_buckets,
         variant=body.variant,
+        requires_breakfast_pool=requires_breakfast_pool,
+        requires_main_pool=requires_main_pool,
     )
     if "message_zh" in pool_data and pool_data.get("feasibility") != "ok":
         raise HTTPException(status_code=400, detail=_closed_loop_error_detail(pool_data))
@@ -576,18 +583,21 @@ def supplement_dish_pool(
     all_sketches = pool_data.get("breakfast_pool", []) + pool_data.get("main_pool", [])
     warnings = list(pool_data.get("warnings", []))
     result: dict = {"named_dishes": [], "warnings": []}
-    try:
-        result = recipe_suggester.suggest_pool_names(all_sketches, language)
-    except Exception as exc:
-        warnings.append(f"supplement naming failed ({exc.__class__.__name__}); returned sketches instead")
-    else:
-        warnings.extend(result.get("warnings", []))
+    if all_sketches:
+        try:
+            result = recipe_suggester.suggest_pool_names(all_sketches, language)
+        except Exception as exc:
+            warnings.append(f"supplement naming failed ({exc.__class__.__name__}); returned sketches instead")
+        else:
+            warnings.extend(result.get("warnings", []))
 
     supplement_dishes = _named_or_raw_supplement(pool_data, result)
     return {
-        "breakfast_dishes": [d for d in supplement_dishes if d.get("meal_type") == "breakfast"],
-        "main_dishes": [d for d in supplement_dishes if d.get("meal_type") == "main"],
+        "breakfast_dishes": [d for d in supplement_dishes if d.get("meal_type") == "breakfast"] if requires_breakfast_pool else [],
+        "main_dishes": [d for d in supplement_dishes if d.get("meal_type") == "main"] if requires_main_pool else [],
         "variant": body.variant,
+        "requires_breakfast_pool": requires_breakfast_pool,
+        "requires_main_pool": requires_main_pool,
         "warnings": warnings,
         "quota_waived": {"kind": llm_quota.POOL_NAME, "reason": "gap_supplement"},
     }

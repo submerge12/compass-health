@@ -30,22 +30,15 @@ from database import get_db
 from services import (
     calorie as calorie_svc,
     food_library as FL,
-    local_dates,
     nutrition_audit,
     procurement,
     feedback_loop,
 )
+from services.local_dates import date_or_422
 
 
 router = APIRouter(prefix="/api/meal-engine", tags=["meal-engine"])
 log = logging.getLogger("compass.app")
-
-
-def _date_or_422(raw: Optional[str]) -> str:
-    try:
-        return local_dates.date_key_or_today(raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
 
 
 # ── Library + bucket metadata (static) ───────────────────────────────────────
@@ -211,7 +204,7 @@ def post_procurement(
             "message_en": "Library is not closed-loop feasible — no shopping list.",
         }
 
-    start_date = _date_or_422(body.start_date if body else None)
+    start_date = date_or_422(body.start_date if body else None)
     key_slugs = {row["slug"] for row in audit.get("non_substitutable", [])}
     result = procurement.aggregate_for_week(db, current_user, start_date, key_slugs)
     log.info(
@@ -242,7 +235,7 @@ def get_daily(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    report = feedback_loop.daily_report(db, current_user, _date_or_422(date))
+    report = feedback_loop.daily_report(db, current_user, date_or_422(date))
     log.info(
         "meal-engine daily feedback viewed",
         extra={
@@ -263,7 +256,7 @@ def get_weekly(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    review = feedback_loop.weekly_review(db, current_user, _date_or_422(end_date))
+    review = feedback_loop.weekly_review(db, current_user, date_or_422(end_date))
     logged_days = len([
         day for day in review.get("dailies", [])
         if day.get("actual", {}).get("entries", 0) > 0

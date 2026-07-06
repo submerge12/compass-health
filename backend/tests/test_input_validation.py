@@ -1,8 +1,24 @@
+import pytest
+from fastapi import HTTPException
+
 from tests.conftest import register
+
+
+INVALID_DATE_DETAIL = "date must be YYYY-MM-DD"
 
 
 def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_shared_date_or_422_rejects_invalid_date_with_standard_detail():
+    from services.local_dates import date_or_422
+
+    with pytest.raises(HTTPException) as exc_info:
+        date_or_422("2026-02-31")
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == INVALID_DATE_DETAIL
 
 
 def test_daily_log_endpoints_reject_invalid_dates(client, clean_db):
@@ -47,6 +63,51 @@ def test_daily_log_endpoints_reject_invalid_dates(client, clean_db):
     for path, payload in cases:
         response = client.post(path, headers=headers, json=payload)
         assert response.status_code == 422, (path, response.text)
+        assert response.json()["detail"] == INVALID_DATE_DETAIL
+
+
+def test_daily_log_endpoints_accept_valid_dates(client, clean_db):
+    auth = register(client, "valid_date_validation_user")
+    headers = _headers(auth["access_token"])
+
+    cases = [
+        (
+            "/api/diet/log",
+            {
+                "date": "2026-04-26",
+                "meal_type": "lunch",
+                "food_name": "rice bowl",
+                "calories": 450,
+            },
+        ),
+        (
+            "/api/water/log",
+            {
+                "date": "2026-04-26",
+                "amount_ml": 250,
+            },
+        ),
+        (
+            "/api/exercise/log",
+            {
+                "date": "2026-04-26",
+                "exercise_type": "walk",
+                "duration_min": 30,
+                "calories_burned": 120,
+            },
+        ),
+        (
+            "/api/condition/log",
+            {
+                "date": "2026-04-26",
+                "weight_kg": 70,
+            },
+        ),
+    ]
+
+    for path, payload in cases:
+        response = client.post(path, headers=headers, json=payload)
+        assert response.status_code == 200, (path, response.text)
 
 
 def test_diet_rejects_unknown_meal_type(client, clean_db):
@@ -74,3 +135,5 @@ def test_meal_engine_rejects_invalid_query_dates(client, clean_db):
 
     assert daily.status_code == 422, daily.text
     assert weekly.status_code == 422, weekly.text
+    assert daily.json()["detail"] == INVALID_DATE_DETAIL
+    assert weekly.json()["detail"] == INVALID_DATE_DETAIL

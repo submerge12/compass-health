@@ -16,6 +16,7 @@ def clean_diet_tables(client):
     db = SessionLocal()
     try:
         for table in (
+            models.RecipeTrialRating,
             models.DietLog,
             models.PhysicalCondition,
             models.RefreshToken,

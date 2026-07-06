@@ -11,6 +11,7 @@ import models
 from auth import get_current_user
 from database import get_db
 from services import local_dates
+from services.local_dates import date_or_422
 
 router = APIRouter(prefix="/api/exercise", tags=["exercise"])
 log = logging.getLogger("compass.app")
@@ -24,20 +25,13 @@ class ExerciseLogRequest(BaseModel):
     date: Optional[str] = Field(default=None, min_length=10, max_length=10)
 
 
-def _date_or_422(raw: Optional[str]) -> str:
-    try:
-        return local_dates.date_key_or_today(raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-
-
 @router.post("/log")
 def log_exercise(
     body: ExerciseLogRequest,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    date = _date_or_422(body.date)
+    date = date_or_422(body.date)
     entry = models.ExerciseLog(
         user_id=current_user.id,
         date=date,

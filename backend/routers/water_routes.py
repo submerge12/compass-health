@@ -11,6 +11,7 @@ import models
 from auth import get_current_user
 from database import get_db
 from services import local_dates
+from services.local_dates import date_or_422
 
 router = APIRouter(prefix="/api/water", tags=["water"])
 log = logging.getLogger("compass.app")
@@ -21,13 +22,6 @@ class WaterLogRequest(BaseModel):
     date: Optional[str] = Field(default=None, min_length=10, max_length=10)
 
 
-def _date_or_422(raw: Optional[str]) -> str:
-    try:
-        return local_dates.date_key_or_today(raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-
-
 @router.post("/log")
 def log_water(
     body: WaterLogRequest,
@@ -36,7 +30,7 @@ def log_water(
 ):
     if body.amount_ml <= 0:
         raise HTTPException(status_code=422, detail="amount_ml must be positive")
-    date = _date_or_422(body.date)
+    date = date_or_422(body.date)
 
     entry = models.WaterLog(user_id=current_user.id, date=date, amount_ml=body.amount_ml)
     db.add(entry)

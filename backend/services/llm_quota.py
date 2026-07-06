@@ -25,6 +25,7 @@ RECIPE_SUGGEST = "recipe_suggest"
 POOL_NAME = "pool_name"
 DIET_ESTIMATE = "diet_estimate"
 PREFERENCE_CLASSIFY = "preference_classify"
+ASSISTANT_CHAT = "assistant_chat"
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ QUOTAS: dict[str, QuotaRule] = {
     POOL_NAME:      QuotaRule(limit=3, window_days=7),
     DIET_ESTIMATE:  QuotaRule(limit=20, window_days=7),
     PREFERENCE_CLASSIFY: QuotaRule(limit=10, window_days=7),
+    ASSISTANT_CHAT: QuotaRule(limit=100, window_days=7),
 }
 
 

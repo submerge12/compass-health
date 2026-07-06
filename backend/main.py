@@ -1,4 +1,5 @@
 from datetime import timezone as _tz
+from contextlib import asynccontextmanager
 
 # Configure logging before anything else imports `logging.getLogger(...)`,
 # so module-level loggers pick up the dictConfig on first use.
@@ -19,18 +20,27 @@ from routers import (
     diet_routes, condition_routes, stats_routes,
     recipe_routes, meal_plan_routes, admin_routes,
     daily_activity_routes, preferences_routes,
-    meal_engine_routes, fixed_meal_routes,
+    meal_engine_routes, fixed_meal_routes, assistant_routes,
 )
 from services import autofill
 import models
 
 log = logging.getLogger("compass.app")
-scheduler = BackgroundScheduler(timezone=_tz.utc)
+scheduler = None
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    on_startup()
+    try:
+        yield
+    finally:
+        on_shutdown()
 
 app = FastAPI(
     title="Compass Health API",
     description="Backend API for Compass Health — a bilingual health tracking app for Chinese immigrants in the US.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
@@ -91,6 +101,7 @@ app.include_router(daily_activity_routes.router)
 app.include_router(preferences_routes.router)
 app.include_router(meal_engine_routes.router)
 app.include_router(fixed_meal_routes.router)
+app.include_router(assistant_routes.router)
 
 
 # ── Built-in recipe seed data (mirrors DIET_RECIPES in diet.js) ───────────────
@@ -219,6 +230,14 @@ def run_migrations():
         add_col_if_missing("recipes", "fat_g",             "FLOAT")
         add_col_if_missing("recipes", "serving_g",         "FLOAT")
         add_col_if_missing("recipes", "ingredient_slugs",  "TEXT")
+        add_col_if_missing("recipes", "ingredients_json",  "TEXT")
+        add_col_if_missing("recipes", "community_status",  "VARCHAR")
+        add_col_if_missing("recipes", "low_fat_score",     "INTEGER")
+        add_col_if_missing("recipes", "low_fat_grade",     "VARCHAR")
+        add_col_if_missing("recipes", "low_fat_assessment_json", "TEXT")
+        add_col_if_missing("recipes", "low_fat_assessed_at", "DATETIME")
+        add_col_if_missing("recipes", "community_rating_avg", "FLOAT")
+        add_col_if_missing("recipes", "community_rating_count", "INTEGER DEFAULT 0")
 
     # meal_plan_entries — pre-computed per-meal nutrition for auto-fill
     if "meal_plan_entries" in inspector.get_table_names():
@@ -227,11 +246,12 @@ def run_migrations():
         add_col_if_missing("meal_plan_entries", "protein_g", "FLOAT")
         add_col_if_missing("meal_plan_entries", "carbs_g",   "FLOAT")
         add_col_if_missing("meal_plan_entries", "fat_g",     "FLOAT")
+        add_col_if_missing("meal_plan_entries", "status",    "VARCHAR DEFAULT 'recipe'")
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
-@app.on_event("startup")
 def on_startup():
+    global scheduler
     log.info("compass-health starting up")
     Base.metadata.create_all(bind=engine)
     run_migrations()
@@ -240,6 +260,9 @@ def on_startup():
         seed_builtin_recipes(db)
     finally:
         db.close()
+
+    if scheduler is None:
+        scheduler = BackgroundScheduler(timezone=_tz.utc)
 
     # Auto-fill yesterday's meal-plan slots that the user left empty. Fires at
     # 00:00 UTC; users have the whole previous day up to midnight to confirm.
@@ -256,11 +279,12 @@ def on_startup():
         log.info("scheduler started (midnight_autofill @ 00:00 UTC)")
 
 
-@app.on_event("shutdown")
 def on_shutdown():
+    global scheduler
     log.info("compass-health shutting down")
-    if scheduler.running:
+    if scheduler and scheduler.running:
         scheduler.shutdown(wait=False)
+    scheduler = None
 
 
 @app.get("/")

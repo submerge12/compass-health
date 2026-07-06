@@ -13,6 +13,8 @@ Invariants enforced on the LLM's response:
     that leak outside the library are dropped.
   * Dish structure must be well-formed (name, non-empty ingredients,
     method steps); malformed candidates are dropped.
+  * LLM output must explicitly mark the dish as a common mainland-China
+    home-style dish; uncommon or unverified dishes are dropped.
   * Macro drift from the slot target is *advisory*: each surviving
     candidate carries a `drift` block (`kcal_diff`, `*_diff_pct`,
     `off_target`) so the UI can badge it, but no candidate is dropped
@@ -97,6 +99,36 @@ def _compute_drift(computed: dict, slot: dict) -> dict:
 
 # ── Candidate validation ────────────────────────────────────────────────────
 
+def _normalise_commonality(cand: dict) -> Optional[dict]:
+    """Return a compact common-dish assessment when the LLM marked it common."""
+    raw = cand.get("commonality")
+    if isinstance(raw, dict):
+        is_common = raw.get("is_common")
+        reason = raw.get("reason") or raw.get("reason_zh") or raw.get("note")
+    else:
+        is_common = cand.get("is_common")
+        reason = cand.get("commonality_reason") or cand.get("common_reason")
+
+    if isinstance(is_common, str):
+        lowered = is_common.strip().lower()
+        if lowered in {"true", "yes", "y", "1", "common"}:
+            is_common = True
+        elif lowered in {"false", "no", "n", "0", "uncommon", "not_common"}:
+            is_common = False
+        else:
+            return None
+    elif isinstance(is_common, (int, float)) and not isinstance(is_common, bool):
+        is_common = bool(is_common)
+
+    if is_common is not True:
+        return None
+
+    return {
+        "is_common": True,
+        "reason": str(reason or "").strip()[:160],
+    }
+
+
 def _clean_candidate(
     cand: dict,
     slot: dict,
@@ -107,6 +139,9 @@ def _clean_candidate(
         return None
     name = str(cand.get("name", "")).strip()
     if not name:
+        return None
+    commonality = _normalise_commonality(cand)
+    if not commonality:
         return None
 
     raw_ings = cand.get("ingredients")
@@ -160,6 +195,7 @@ def _clean_candidate(
         "method_steps": steps_text,
         "totals": totals,
         "drift": drift,
+        "commonality": commonality,
     }
 
 
@@ -170,6 +206,9 @@ def _reject_reason(cand, library_slugs: set[str]) -> str:
         return f"not_a_dict({type(cand).__name__})"
     if not str(cand.get("name", "")).strip():
         return "empty_name"
+    if not _normalise_commonality(cand):
+        raw = cand.get("commonality") if "commonality" in cand else cand.get("is_common")
+        return f"not_common_or_missing_commonality:{raw!r}"
     ings = cand.get("ingredients")
     if not isinstance(ings, list) or not ings:
         return "no_ingredients"
@@ -248,6 +287,13 @@ You may:
 
 You MUST NOT introduce ingredients outside the library as main ingredients.
 
+You MUST judge whether every proposed dish is a common mainland-China
+home-style dish. "Common" means an ordinary user in China would recognise the
+dish name and cooking method from normal home, canteen, or everyday restaurant
+contexts; reject invented fusion names, novelty/gimmick dishes, rare foreign
+preparations, unnatural ingredient pairings, or hard-to-buy specialties.
+Only return candidates where commonality.is_common is true.
+
 Each dish must keep the slot's macro targets within ±10 % and kcal within ±50.
 
 Write dish names and cooking steps in {lang_label}.
@@ -258,6 +304,7 @@ Return ONLY valid JSON in this exact shape (no prose, no markdown fences):
     "<slot_key>": [
       {{
         "name": "菜名",
+        "commonality": {{"is_common": true, "reason": "why this is an everyday mainland-China dish"}},
         "ingredients": [{{"slug": "<library_slug>", "grams": <number>}}, ...],
         "seasonings": [{{"name": "生抽", "grams": 5}}, ...],
         "method_steps": ["步骤1...", "步骤2...", "步骤3..."]
@@ -355,7 +402,10 @@ percentages). Produce exactly {n} REVISED candidates per slot that:
   * correct the drift shown — if kcal was too high, reduce portions or swap
     for a lower-density food; if protein was too low, raise the protein-source
     grams or substitute a denser protein; likewise for carbs/fat,
-  * remain plausible as a healthy home-cooked Chinese meal.
+  * remain plausible as a healthy home-cooked Chinese meal,
+  * be common mainland-China home-style dishes with recognisable names and
+    normal cooking methods. Do not return invented fusion, novelty/gimmick,
+    rare foreign, or unnatural ingredient-pairing dishes.
 
 Seasonings (soy sauce, salt, ginger, garlic, vinegar, cooking oil) are free and
 do not need to come from the library.
@@ -368,6 +418,7 @@ Return ONLY valid JSON in this exact shape (no prose, no markdown fences):
     "<slot_key>": [
       {{
         "name": "菜名",
+        "commonality": {{"is_common": true, "reason": "why this is an everyday mainland-China dish"}},
         "ingredients": [{{"slug": "<library_slug>", "grams": <number>}}, ...],
         "seasonings": [{{"name": "生抽", "grams": 5}}, ...],
         "method_steps": ["步骤1...", "步骤2...", "步骤3..."]
@@ -577,6 +628,12 @@ def suggest_for_day(
                 if revised:
                     candidates[slot["slot_key"]] = revised
 
+    for slot_key, cands in list(candidates.items()):
+        on_target = [c for c in cands if not c["drift"]["off_target"]]
+        if cands and not on_target:
+            warnings.append(f"{slot_key}: all candidates missed macro target")
+        candidates[slot_key] = on_target
+
     return {"date": date_str, "candidates": candidates, "warnings": warnings}
 
 
@@ -593,6 +650,10 @@ You are a meal-planning chef specialising in healthy Chinese home-style cooking.
 For each dish sketch below, assign a realistic dish name and step-by-step cooking method.
 Each sketch lists the FIXED main ingredients with gram quantities — do not change them.
 You may suggest small amounts of free seasonings (salt, soy sauce, ginger, garlic, cooking oil, etc.).
+Every named dish must be a common mainland-China home-style dish: recognisable
+to ordinary users, practical for normal home/canteen cooking, and not an
+invented fusion, novelty/gimmick, rare foreign, or unnatural pairing.
+Only return dishes where commonality.is_common is true.
 
 Write dish names and cooking steps in {lang_label}.
 
@@ -601,6 +662,7 @@ Return ONLY valid JSON (no markdown fences):
   "dishes": {{
     "<sketch_id>": {{
       "name": "dish name",
+      "commonality": {{"is_common": true, "reason": "why this is an everyday mainland-China dish"}},
       "seasonings": [{{"name": "...", "grams": <number>}}, ...],
       "method_steps": ["Step 1...", "Step 2...", "Step 3..."]
     }},
@@ -711,6 +773,10 @@ def suggest_pool_names(
         if not name:
             warnings.append(f"sketch {sid}: empty name from LLM")
             continue
+        commonality = _normalise_commonality(llm_data)
+        if not commonality:
+            warnings.append(f"sketch {sid}: LLM returned uncommon or unverified dish")
+            continue
         raw_steps = llm_data.get("method_steps")
         if isinstance(raw_steps, list):
             steps_text = "\n".join(
@@ -743,6 +809,7 @@ def suggest_pool_names(
             "method_steps": steps_text,
             "totals": sketch.get("totals", {}),
             "ingredient_slugs": sketch.get("ingredient_slugs", []),
+            "commonality": commonality,
         })
 
     return {"named_dishes": named_dishes, "warnings": warnings}

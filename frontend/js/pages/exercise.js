@@ -99,10 +99,10 @@ const ExercisePage = {
       return `
         <div class="log-item">
           <div class="log-info">
-            <div><strong>${t('exercise.types.' + l.exercise_type) || l.exercise_type}</strong></div>
+            <div><strong>${this._esc(t('exercise.types.' + l.exercise_type) || l.exercise_type)}</strong></div>
             <span class="log-value">${l.calories_burned} kcal</span>
             <span class="log-time">${l.duration_min} ${t('common.min')} · ${time}</span>
-            ${l.notes ? `<div style="font-size:0.74rem;color:var(--text-3)">${l.notes}</div>` : ''}
+            ${l.notes ? `<div style="font-size:0.74rem;color:var(--text-3)">${this._esc(l.notes)}</div>` : ''}
           </div>
           <button class="log-delete" onclick="ExercisePage._deleteLog(${l.id})">✕</button>
         </div>`;
@@ -160,5 +160,15 @@ const ExercisePage = {
     } catch (err) {
       App.showToast(err.message, 'error');
     }
+  },
+
+  _esc(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 };

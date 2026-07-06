@@ -1,0 +1,59 @@
+{
+  "entryPagePath": "pages/login/login",
+  "pages": [
+    "pages/dashboard/dashboard",
+    "pages/diet/diet",
+    "pages/meal-plan/meal-plan",
+    "pages/stats/stats",
+    "pages/settings/settings",
+    "pages/login/login"
+  ],
+  "window": {
+    "navigationBarTitleText": "Compass Health",
+    "navigationBarBackgroundColor": "#f5f8fb",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f5f8fb"
+  },
+  "tabBar": {
+    "color": "#66736f",
+    "selectedColor": "#167c70",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "black",
+    "list": [
+      {
+        "pagePath": "pages/dashboard/dashboard",
+        "iconPath": "assets/tabbar/home.png",
+        "selectedIconPath": "assets/tabbar/home-active.png",
+        "text": "首页"
+      },
+      {
+        "pagePath": "pages/diet/diet",
+        "iconPath": "assets/tabbar/diet.png",
+        "selectedIconPath": "assets/tabbar/diet-active.png",
+        "text": "饮食"
+      },
+      {
+        "pagePath": "pages/meal-plan/meal-plan",
+        "iconPath": "assets/tabbar/meal-plan.png",
+        "selectedIconPath": "assets/tabbar/meal-plan-active.png",
+        "text": "配餐"
+      },
+      {
+        "pagePath": "pages/stats/stats",
+        "iconPath": "assets/tabbar/stats.png",
+        "selectedIconPath": "assets/tabbar/stats-active.png",
+        "text": "统计"
+      },
+      {
+        "pagePath": "pages/settings/settings",
+        "iconPath": "assets/tabbar/settings.png",
+        "selectedIconPath": "assets/tabbar/settings-active.png",
+        "text": "设置"
+      }
+    ]
+  },
+  "networkTimeout": {
+    "request": 30000
+  },
+  "sitemapLocation": "sitemap.json"
+}

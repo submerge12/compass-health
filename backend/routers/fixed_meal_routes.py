@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 import models
 from auth import get_current_user
 from database import get_db
+from services import recipe_access
 
 
 router = APIRouter(prefix="/api/fixed-meals", tags=["fixed-meals"])
@@ -97,8 +98,8 @@ def _require_weekday(weekday: Optional[int]) -> None:
         )
 
 
-def _load_recipe(db: Session, recipe_id: int) -> models.Recipe:
-    recipe = db.query(models.Recipe).filter_by(id=recipe_id).first()
+def _load_recipe(db: Session, recipe_id: int, user_id: int) -> models.Recipe:
+    recipe = recipe_access.get_visible_recipe(db, recipe_id, user_id)
     if recipe is None:
         raise HTTPException(status_code=404, detail=f"Recipe {recipe_id} not found")
     return recipe
@@ -178,7 +179,7 @@ def create_fixed_meal(
                    "custom_name alone won't appear in shopping lists).",
         )
 
-    recipe = _load_recipe(db, body.recipe_id) if body.recipe_id else None
+    recipe = _load_recipe(db, body.recipe_id, current_user.id) if body.recipe_id else None
     macros = _scaled_macros(recipe, body.portion_g)
 
     row = models.UserFixedMeal(
@@ -247,9 +248,9 @@ def update_fixed_meal(
     if recipe_changed:
         new_recipe_id = payload["recipe_id"]
         row.recipe_id = new_recipe_id
-        recipe = _load_recipe(db, new_recipe_id) if new_recipe_id else None
+        recipe = _load_recipe(db, new_recipe_id, current_user.id) if new_recipe_id else None
     elif portion_changed and row.recipe_id:
-        recipe = _load_recipe(db, row.recipe_id)
+        recipe = _load_recipe(db, row.recipe_id, current_user.id)
     else:
         recipe = None
 
@@ -261,7 +262,7 @@ def update_fixed_meal(
         if recipe is None and row.recipe_id:
             # Recipe wasn't in this payload but is still linked — load it
             # so the new portion scales correctly.
-            recipe = _load_recipe(db, row.recipe_id)
+            recipe = _load_recipe(db, row.recipe_id, current_user.id)
         macros = _scaled_macros(recipe, row.portion_g)
         row.calories  = macros["calories"]
         row.protein_g = macros["protein_g"]

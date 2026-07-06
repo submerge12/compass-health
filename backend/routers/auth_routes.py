@@ -1,9 +1,11 @@
+import hashlib
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 import models
@@ -29,30 +31,31 @@ log = logging.getLogger("compass.auth")
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 REFRESH_TOKEN_EXPIRE_DAYS = 7
+_bootstrap_admin_lock = threading.Lock()
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
-    username: str
-    email: Optional[str] = None          # optional — auto-generated if omitted
-    password: str
+    username: str = Field(..., min_length=3, max_length=64)
+    email: Optional[str] = Field(default=None, max_length=254)          # optional — auto-generated if omitted
+    password: str = Field(..., min_length=6, max_length=256)
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=256)
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(..., min_length=16, max_length=512)
 
 
 class LogoutRequest(BaseModel):
     # Optional so the client can logout even if it has already lost its
     # refresh token. When omitted, all refresh tokens for the authenticated
     # user are revoked (logout-everywhere semantics).
-    refresh_token: Optional[str] = None
+    refresh_token: Optional[str] = Field(default=None, min_length=16, max_length=512)
 
 
 class TokenResponse(BaseModel):
@@ -67,16 +70,33 @@ class TokenResponse(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _build_token_response(user: models.User, db: Session) -> dict:
-    access_token = create_access_token(data={"sub": str(user.id)})
+def _hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _new_refresh_token_row(user_id: int) -> tuple[str, models.RefreshToken]:
     refresh_token_str = create_refresh_token()
     expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-
-    db_refresh = models.RefreshToken(
-        user_id=user.id,
-        token=refresh_token_str,
+    return refresh_token_str, models.RefreshToken(
+        user_id=user_id,
+        token=_hash_refresh_token(refresh_token_str),
         expires_at=expires_at,
     )
+
+
+def _consume_refresh_token(db: Session, token_hash: str) -> bool:
+    deleted = (
+        db.query(models.RefreshToken)
+        .filter(models.RefreshToken.token == token_hash)
+        .delete(synchronize_session="fetch")
+    )
+    db.flush()
+    return deleted == 1
+
+
+def _build_token_response(user: models.User, db: Session) -> dict:
+    access_token = create_access_token(data={"sub": str(user.id)})
+    refresh_token_str, db_refresh = _new_refresh_token_row(user.id)
     db.add(db_refresh)
     db.commit()
 
@@ -116,22 +136,24 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
         # Avoid collision for auto-generated placeholder
         email = f"{body.username}_{datetime.now(timezone.utc).timestamp():.0f}@local.compass"
 
-    # First registered user automatically becomes admin
-    is_first_user = db.query(models.User).count() == 0
+    # First registered user automatically becomes admin. Keep the bootstrap
+    # decision and insert together in one process-local critical section.
+    with _bootstrap_admin_lock:
+        is_first_user = db.query(models.User).count() == 0
 
-    user = models.User(
-        username=body.username,
-        email=email,
-        hashed_password=hash_password(body.password),
-        is_admin=is_first_user,
-    )
-    db.add(user)
-    db.flush()   # get user.id before commit
+        user = models.User(
+            username=body.username,
+            email=email,
+            hashed_password=hash_password(body.password),
+            is_admin=is_first_user,
+        )
+        db.add(user)
+        db.flush()   # get user.id before commit
 
-    db.add(models.Membership(user_id=user.id, level="free"))
-    db.add(models.UserSettings(user_id=user.id))
-    db.commit()
-    db.refresh(user)
+        db.add(models.Membership(user_id=user.id, level="free"))
+        db.add(models.UserSettings(user_id=user.id))
+        db.commit()
+        db.refresh(user)
 
     # Populate contextvar so the access-log line for this request carries
     # the freshly minted user_id instead of "-".
@@ -176,9 +198,11 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
 @router.post("/refresh")
 def refresh_token(body: RefreshRequest, db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
+    token_hash = _hash_refresh_token(body.refresh_token)
     db_token = (
         db.query(models.RefreshToken)
-        .filter(models.RefreshToken.token == body.refresh_token)
+        .filter(models.RefreshToken.token == token_hash)
+        .with_for_update()
         .first()
     )
     if not db_token:
@@ -189,16 +213,17 @@ def refresh_token(body: RefreshRequest, db: Session = Depends(get_db)):
     if token_expires.tzinfo is None:
         token_expires = token_expires.replace(tzinfo=timezone.utc)
     if token_expires < now:
-        db.delete(db_token)
+        target_user_id = db_token.user_id
+        _consume_refresh_token(db, token_hash)
         db.commit()
         log.info(
             "refresh failed: expired",
-            extra={"event": "refresh_expired", "target_user_id": db_token.user_id},
+            extra={"event": "refresh_expired", "target_user_id": target_user_id},
         )
         raise HTTPException(status_code=401, detail="Refresh token expired")
 
     user = db.query(models.User).filter(models.User.id == db_token.user_id).first()
-    if not user:
+    if not user or not user.is_active:
         log.warning(
             "refresh failed: user missing",
             extra={"event": "refresh_orphan", "target_user_id": db_token.user_id},
@@ -206,8 +231,22 @@ def refresh_token(body: RefreshRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="User not found")
 
     user_id_var.set(user.id)
+    if not _consume_refresh_token(db, token_hash):
+        db.rollback()
+        log.warning(
+            "refresh failed: replayed token",
+            extra={"event": "refresh_replay", "target_user_id": user.id},
+        )
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
     access_token = create_access_token(data={"sub": str(user.id)})
-    return {"access_token": access_token, "token_type": "bearer"}
+    refresh_token_str, new_refresh = _new_refresh_token_row(user.id)
+    db.add(new_refresh)
+    db.commit()
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token_str,
+        "token_type": "bearer",
+    }
 
 
 @router.post("/logout")
@@ -223,7 +262,7 @@ def logout(
     # If a specific refresh token is provided, revoke only that session;
     # otherwise revoke every session for this user.
     if body and body.refresh_token:
-        q = q.filter(models.RefreshToken.token == body.refresh_token)
+        q = q.filter(models.RefreshToken.token == _hash_refresh_token(body.refresh_token))
     else:
         scope = "all"
     deleted = q.delete(synchronize_session=False)

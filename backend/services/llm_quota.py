@@ -23,6 +23,9 @@ import models
 
 RECIPE_SUGGEST = "recipe_suggest"
 POOL_NAME = "pool_name"
+DIET_ESTIMATE = "diet_estimate"
+PREFERENCE_CLASSIFY = "preference_classify"
+ASSISTANT_CHAT = "assistant_chat"
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,9 @@ class QuotaRule:
 QUOTAS: dict[str, QuotaRule] = {
     RECIPE_SUGGEST: QuotaRule(limit=3, window_days=7),
     POOL_NAME:      QuotaRule(limit=3, window_days=7),
+    DIET_ESTIMATE:  QuotaRule(limit=20, window_days=7),
+    PREFERENCE_CLASSIFY: QuotaRule(limit=10, window_days=7),
+    ASSISTANT_CHAT: QuotaRule(limit=100, window_days=7),
 }
 
 
@@ -108,18 +114,75 @@ def check(db: Session, user_id: int, kind: str) -> dict:
     return u
 
 
-def consume(db: Session, user_id: int, kind: str) -> None:
-    """Record an LLM call. Caller is responsible for committing the session."""
+def consume(db: Session, user_id: int, kind: str, *, now: datetime | None = None) -> int:
+    """Record an LLM call and return its row id.
+
+    Caller is responsible for committing the session.
+    """
     _rule(kind)  # validate kind
-    db.add(models.LLMCallLog(user_id=user_id, kind=kind))
+    row = models.LLMCallLog(user_id=user_id, kind=kind)
+    if now is not None:
+        row.called_at = now
+    db.add(row)
     db.flush()
+    return int(row.id)
 
 
 def check_and_consume(db: Session, user_id: int, kind: str) -> dict:
-    """Raise if quota exceeded, else log the call and return fresh usage."""
-    check(db, user_id, kind)
-    consume(db, user_id, kind)
-    return usage(db, user_id, kind)
+    """Raise if quota exceeded, else log the call and return fresh usage.
+
+    The returned dict includes `call_log_id`, which callers should keep if
+    they need to refund this exact charge later.
+    """
+    rule = _rule(kind)
+    now = datetime.now(timezone.utc)
+
+    # On databases that support row locks, this serializes quota changes for a
+    # user. SQLite ignores FOR UPDATE, but the insert below still holds a write
+    # lock for the duration of the transaction.
+    db.query(models.User.id).filter(models.User.id == user_id).with_for_update().first()
+
+    call_log_id = consume(db, user_id, kind, now=now)
+    current = usage(db, user_id, kind, now=now)
+    if current["used"] > rule.limit:
+        refund_call(db, call_log_id, user_id=user_id, kind=kind)
+        refreshed = usage(db, user_id, kind, now=now)
+        next_refresh = (
+            datetime.fromisoformat(refreshed["next_refresh_at"])
+            if refreshed["next_refresh_at"]
+            else now
+        )
+        raise LLMQuotaExceeded(kind, rule.limit, refreshed["used"], next_refresh)
+    current["call_log_id"] = call_log_id
+    return current
+
+
+def refund_call(
+    db: Session,
+    call_log_id: int | None,
+    *,
+    user_id: int | None = None,
+    kind: str | None = None,
+) -> bool:
+    """Delete one specific quota charge.
+
+    Returns True when a matching row was removed. Optional user/kind guards
+    prevent refunding the wrong row if stale ids are ever passed around.
+    """
+    if call_log_id is None:
+        return False
+    query = db.query(models.LLMCallLog).filter(models.LLMCallLog.id == call_log_id)
+    if user_id is not None:
+        query = query.filter(models.LLMCallLog.user_id == user_id)
+    if kind is not None:
+        _rule(kind)
+        query = query.filter(models.LLMCallLog.kind == kind)
+    row = query.first()
+    if row is None:
+        return False
+    db.delete(row)
+    db.flush()
+    return True
 
 
 def refund_latest(db: Session, user_id: int, kind: str) -> bool:

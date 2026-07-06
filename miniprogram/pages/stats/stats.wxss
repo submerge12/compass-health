@@ -1,0 +1,7 @@
+.bar-fill.water {
+  background: #2f8fc3;
+}
+
+.page-stats {
+  background: linear-gradient(180deg, #f0edff 0%, #f5f8fb 42%);
+}

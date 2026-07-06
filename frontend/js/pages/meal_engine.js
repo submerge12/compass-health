@@ -13,9 +13,13 @@ const MealEnginePage = {
   _cache: {
     meal_plan_pool: null,
     pool_selection: null,
+    pool_carryover: null,
     arranged_plan: null,
     arrange_issue: null,
     pool_history: null,
+    pool_history_key: null,
+    pool_variant: 0,
+    pool_source_filter: 'all',
     preference_catalog: null,
     saved: null,
     procurement: null,
@@ -36,6 +40,25 @@ const MealEnginePage = {
   _weekdayLabel(wd) {
     if (wd == null) return I18n.t('plan.weekday_any');
     return I18n.t(this._WEEKDAY_I18N[wd] || 'plan.weekday_any');
+  },
+
+  _localizedRecipeName(name) {
+    const raw = String(name || '').trim();
+    if (!raw) return raw;
+    const zh = {
+      'fixed breakfast': '固定早餐',
+      'breakfast': '早餐',
+      '2 eggs + 200ml milk': '2个鸡蛋 + 200ml 牛奶',
+      '2 eggs + 200 ml milk': '2个鸡蛋 + 200ml 牛奶',
+    };
+    const en = {
+      '固定早餐': 'Fixed breakfast',
+      '早餐': 'Breakfast',
+      '2个鸡蛋 + 200ml 牛奶': '2 eggs + 200ml milk',
+    };
+    const key = raw.toLowerCase();
+    if (I18n.lang === 'en') return en[raw] || raw;
+    return zh[key] || raw;
   },
 
   _ACTIVITY_I18N: {
@@ -77,10 +100,7 @@ const MealEnginePage = {
 
     el.querySelectorAll('.plan-tab').forEach(btn => {
       btn.addEventListener('click', () => {
-        this._activeTab = btn.getAttribute('data-tab');
-        el.querySelectorAll('.plan-tab').forEach(b =>
-          b.classList.toggle('active', b === btn)
-        );
+        this._selectTab(btn.getAttribute('data-tab'));
         this._renderActive();
       });
     });
@@ -91,6 +111,13 @@ const MealEnginePage = {
   _tabBtn(key, i18n) {
     const active = this._activeTab === key ? 'active' : '';
     return `<button type="button" class="plan-tab ${active}" data-tab="${key}">${I18n.t(i18n)}</button>`;
+  },
+
+  _selectTab(key) {
+    this._activeTab = key;
+    document.querySelectorAll('#page-plan .plan-tab').forEach(btn => {
+      btn.classList.toggle('active', btn.getAttribute('data-tab') === key);
+    });
   },
 
   async _renderActive() {
@@ -107,7 +134,14 @@ const MealEnginePage = {
       }
       I18n.apply();
     } catch (err) {
-      panel.innerHTML = `<div class="card"><div class="empty-state">${I18n.t('common.error')}: ${this._esc(err.message)}</div></div>`;
+      const closedLoopIssue = this._normalizeClosedLoopIssue(err.detail || err.message);
+      if (closedLoopIssue) {
+        panel.innerHTML = this._renderClosedLoopIssue(closedLoopIssue);
+        this._bindClosedLoopIssueActions(panel, closedLoopIssue);
+        I18n.apply();
+        return;
+      }
+      panel.innerHTML = `<div class="card"><div class="empty-state">${I18n.t('common.error')}: ${this._esc(this._userFacingMessage(err.detail || err.message) || err.message)}</div></div>`;
     }
   },
 
@@ -193,8 +227,8 @@ const MealEnginePage = {
   /* ------------------------------------------------------------------
      Tab - Shopping list (procurement, spec-v1)
      ------------------------------------------------------------------ */
-  async _renderProcurement(panel) {
-    const data = await API.mealEngineProcurement(null);
+  async _renderProcurement(panel, preloadedData = null) {
+    const data = preloadedData || await API.mealEngineProcurement(null);
     this._cache.procurement = data;
     const t = k => I18n.t(k);
     const lang = I18n.lang;
@@ -278,7 +312,7 @@ const MealEnginePage = {
       .filter(Boolean);
 
     const rowsHtml = items.map(item => {
-      const nameLabel = item.recipe_name || item.custom_name || '--';
+      const nameLabel = this._localizedRecipeName(item.recipe_name || item.custom_name || '--');
       const portion = item.portion_g != null ? `${item.portion_g} g` : '--';
       return `
         <div class="card saved-recipe-card" data-fixed-row="${item.id}">
@@ -567,6 +601,118 @@ MealEnginePage._pairSummary = function(parts) {
   return parts.map(part => String(part || '').trim()).filter(Boolean).join(' · ');
 };
 
+MealEnginePage._renderWarningCard = function(warnings, title = I18n.t('plan.warnings')) {
+  const items = this._formatPlanWarnings(warnings);
+  if (!items.length) return '';
+  return `
+    <div class="card plan-warning-card">
+      <h4>${this._esc(title)}</h4>
+      <ul class="plan-list">${items.map(item => `<li>${this._esc(item)}</li>`).join('')}</ul>
+    </div>
+  `;
+};
+
+MealEnginePage._formatPlanWarnings = function(warnings) {
+  if (!Array.isArray(warnings) || !warnings.length) return [];
+  const kcalGaps = [];
+  const output = [];
+  warnings.forEach(warning => {
+    const raw = String(warning || '').trim();
+    if (!raw) return;
+    const kcalMatch = raw.match(/^(\d{4}-\d{2}-\d{2}): daily kcal gap ([\d.]+) exceeds the preferred planning band\.?$/i);
+    if (kcalMatch) {
+      kcalGaps.push({ date: kcalMatch[1], gap: Number(kcalMatch[2]) });
+      return;
+    }
+    output.push(this._translatePlanWarning(raw));
+  });
+
+  if (kcalGaps.length) {
+    kcalGaps.sort((a, b) => a.date.localeCompare(b.date));
+    const gapText = kcalGaps.map(item => {
+      const gap = Number.isFinite(item.gap) ? Math.round(item.gap) : item.gap;
+      return I18n.lang === 'zh'
+        ? `${this._formatDateShort(item.date)} 差 ${gap} kcal`
+        : `${this._formatDateShort(item.date)} off by ${gap} kcal`;
+    }).join(I18n.lang === 'zh' ? '、' : ', ');
+    output.unshift(I18n.lang === 'zh'
+      ? `有 ${kcalGaps.length} 天热量偏离目标超过系统偏好范围：${gapText}。通常是固定餐/已记录餐占位、候选菜热量不够贴合，或保留的候选池太少；餐单仍可用，可按需手动替换。`
+      : `${kcalGaps.length} days are outside the preferred calorie band: ${gapText}. This usually comes from fixed/logged meals, imperfect candidate calories, or too few kept candidates; the plan is still usable and can be adjusted manually.`);
+  }
+
+  return output;
+};
+
+MealEnginePage._translatePlanWarning = function(raw) {
+  const microMatch = raw.match(/^weekly micronutrient coverage is low for (.+?) \(([\d.]+)\/([\d.]+) ([^)]+)\)\.?$/i);
+  if (microMatch) {
+    const nutrient = this._nutrientLabel(microMatch[1]);
+    return I18n.lang === 'zh'
+      ? `本周${nutrient}覆盖略低：${microMatch[2]}/${microMatch[3]} ${microMatch[4]}。差距不大时不会阻止排餐，可通过坚果、种子或健康脂肪类食材补足。`
+      : `Weekly ${nutrient} coverage is slightly low: ${microMatch[2]}/${microMatch[3]} ${microMatch[4]}. This does not block the plan; add nuts, seeds, or healthy fats to cover it.`;
+  }
+
+  if (/some recorded meals do not expose structured ingredients/i.test(raw)) {
+    return I18n.lang === 'zh'
+      ? '有已记录餐食缺少结构化食材明细，系统可能低估本周微量元素覆盖；用“食材+重量”记录会更准确。'
+      : 'Some logged meals do not include structured ingredient details, so weekly micronutrient coverage may be understated.';
+  }
+
+  const repetitionMatch = raw.match(/^high weekly repetition for:\s*(.+)$/i);
+  if (repetitionMatch) {
+    const names = repetitionMatch[1]
+      .split(',')
+      .map(slug => this._foodLabelForSlug(slug.trim()))
+      .filter(Boolean)
+      .join(I18n.lang === 'zh' ? '、' : ', ');
+    return I18n.lang === 'zh'
+      ? `本周重复食材偏多：${names}。这是因为这些食材更容易满足热量和营养目标；可以重新生成候选池，或取消一些重复菜。`
+      : `High weekly ingredient repetition: ${names}. These foods fit the targets easily; regenerate the pool or deselect repeated dishes for more variety.`;
+  }
+
+  const floorMatch = raw.match(/^'([^']+)' placed ×(\d+) this week \(weekly_floor=(\d+)\)\. Consider scheduling it explicitly\.?$/i);
+  if (floorMatch) {
+    const name = this._foodLabelForSlug(floorMatch[1]);
+    return I18n.lang === 'zh'
+      ? `${name} 本周出现 ${floorMatch[2]} 次，低于建议 ${floorMatch[3]} 次；可以手动安排一次。`
+      : `${name} appears ${floorMatch[2]} time(s), below the suggested ${floorMatch[3]}; schedule it manually if needed.`;
+  }
+
+  return this._userFacingMessage(raw) || raw;
+};
+
+MealEnginePage._foodLabelForSlug = function(slug) {
+  const key = String(slug || '').trim();
+  if (!key) return '';
+  if (typeof PREF_LABELS !== 'undefined' && PREF_LABELS[key]) {
+    return PREF_LABELS[key][I18n.lang] || PREF_LABELS[key].zh || PREF_LABELS[key].en || key;
+  }
+  return this._humanizeSlug(key) || key;
+};
+
+MealEnginePage._nutrientLabel = function(name) {
+  const text = String(name || '').trim();
+  const zhMap = {
+    'Vitamin E': '维生素 E',
+    'Vitamin D': '维生素 D',
+    Calcium: '钙',
+    Iron: '铁',
+    Zinc: '锌',
+    Iodine: '碘',
+  };
+  return I18n.lang === 'zh' ? (zhMap[text] || text) : text;
+};
+
+MealEnginePage._formatDateShort = function(dateStr) {
+  const [year, month, day] = String(dateStr || '').split('-').map(Number);
+  if (!year || !month || !day) return dateStr;
+  const date = new Date(Date.UTC(year, month - 1, day, 12));
+  return date.toLocaleDateString(I18n.lang === 'zh' ? 'zh-CN' : 'en-US', {
+    month: 'numeric',
+    day: 'numeric',
+  });
+};
+
 MealEnginePage._userFacingMessage = function(value) {
   if (!value) return '';
   if (typeof value === 'object') {
@@ -589,7 +735,179 @@ MealEnginePage._userFacingMessage = function(value) {
   return text;
 };
 
-MealEnginePage._normalizePoolDish = function(dish, fallbackMealType) {
+MealEnginePage._normalizeClosedLoopIssue = function(value) {
+  let detail = value;
+  if (typeof detail === 'string') {
+    const text = detail.trim();
+    if (!text.startsWith('{')) return null;
+    try { detail = JSON.parse(text); } catch { return null; }
+  }
+  if (!detail || typeof detail !== 'object' || detail.error !== 'not_closed_loop') return null;
+
+  const labelMap = {
+    staple: { zh: '主食 / 碳水来源', en: 'Staples / carbohydrates' },
+    lean_protein: { zh: '低脂蛋白', en: 'Lean protein' },
+    red_meat_shellfish: { zh: '红肉 / 贝类', en: 'Red meat / shellfish' },
+    calcium: { zh: '钙源', en: 'Calcium source' },
+    iodine: { zh: '碘源', en: 'Iodine source' },
+    vitamin_d: { zh: '维生素 D 来源', en: 'Vitamin D source' },
+    dark_green_cruciferous: { zh: '深绿叶菜 / 十字花科', en: 'Dark-green / cruciferous' },
+    vitamin_e_healthy_fat: { zh: '维生素 E / 健康脂肪', en: 'Vitamin E / healthy fat' },
+  };
+
+  const rawBuckets = Array.isArray(detail.missing_blocking_buckets)
+    ? detail.missing_blocking_buckets
+    : Array.isArray(detail.blocking_buckets)
+      ? detail.blocking_buckets
+      : [];
+  const missingBuckets = rawBuckets.map(item => {
+    if (typeof item === 'string') {
+      const label = labelMap[item] || { zh: item, en: item };
+      return {
+        bucket: item,
+        label_zh: label.zh,
+        label_en: label.en,
+        recommended_foods: [],
+      };
+    }
+    const bucket = item.bucket || item.ref || '';
+    const label = labelMap[bucket] || {};
+    return {
+      bucket,
+      label_zh: item.label_zh || label.zh || bucket,
+      label_en: item.label_en || label.en || bucket,
+      recommended_foods: Array.isArray(item.recommended_foods) ? item.recommended_foods : [],
+    };
+  });
+
+  const recommended = new Map();
+  (detail.recommended_foods || []).forEach(food => {
+    if (food?.slug) recommended.set(food.slug, food);
+  });
+  missingBuckets.forEach(bucket => {
+    (bucket.recommended_foods || []).forEach(food => {
+      if (food?.slug && !recommended.has(food.slug)) recommended.set(food.slug, food);
+    });
+  });
+
+  return {
+    error: 'not_closed_loop',
+    message_zh: detail.message_zh || '',
+    message_en: detail.message_en || '',
+    missing_blocking_buckets: missingBuckets,
+    recommended_foods: Array.from(recommended.values()),
+    added_slugs: [],
+    action_message: '',
+  };
+};
+
+MealEnginePage._renderClosedLoopIssue = function(issue) {
+  const t = k => I18n.t(k);
+  const lang = I18n.lang;
+  const missingRows = (issue.missing_blocking_buckets || []).map(item => `
+    <div class="plan-issue-row">
+      <div>
+        <strong>${this._esc(item[`label_${lang}`] || item.label_en || item.bucket)}</strong>
+        <div class="muted">${t('plan.closed_loop_bucket_help')}</div>
+      </div>
+    </div>`).join('');
+
+  const allAdded = (issue.recommended_foods || []).length > 0
+    && issue.recommended_foods.every(food => (issue.added_slugs || []).includes(food.slug));
+  const recommendationCards = (issue.recommended_foods || []).map(food => {
+    const name = this._foodDisplayName(food);
+    const roleLabels = (lang === 'zh' ? food.role_labels_zh : food.role_labels_en) || [];
+    const added = (issue.added_slugs || []).includes(food.slug);
+    return `
+      <div class="plan-recommend-card">
+        <div>
+          <strong>${this._esc(name)}</strong>
+          <div class="muted">${this._esc(roleLabels.join(lang === 'zh' ? '、' : ', '))}</div>
+        </div>
+        <button type="button" class="btn btn-sm" data-closed-loop-add="${this._esc(food.slug)}" ${added ? 'disabled' : ''}>
+          ${added ? t('plan.issue_added_notice') : t('plan.issue_add_pref_btn')}
+        </button>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="card plan-issue-card">
+      <div class="flex-row">
+        <div>
+          <h4>${t('plan.closed_loop_title')}</h4>
+          <div class="muted">${this._esc(issue[`message_${lang}`] || issue.message_en || '')}</div>
+        </div>
+        <button type="button" class="btn btn-primary btn-sm" id="mp-closed-loop-add-all-refresh" ${allAdded || !(issue.recommended_foods || []).length ? 'disabled' : ''}>
+          ${t('plan.closed_loop_add_all_and_refresh')}
+        </button>
+      </div>
+      ${issue.action_message ? `<div class="plan-issue-feedback">${this._esc(issue.action_message)}</div>` : ''}
+      <div class="plan-issue-grid">
+        <div>
+          <h5>${t('plan.closed_loop_missing_list')}</h5>
+          <div class="plan-issue-list">${missingRows || `<div class="muted">${t('plan.closed_loop_unknown_gap')}</div>`}</div>
+        </div>
+        <div>
+          <h5>${t('plan.issue_recommendations_title')}</h5>
+          <div class="plan-recommend-grid">${recommendationCards || `<div class="muted">${t('plan.issue_no_supported_foods')}</div>`}</div>
+        </div>
+      </div>
+    </div>`;
+};
+
+MealEnginePage._bindClosedLoopIssueActions = function(panel, issue) {
+  const t = k => I18n.t(k);
+  panel.querySelectorAll('[data-closed-loop-add]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const slug = btn.getAttribute('data-closed-loop-add');
+      const food = (issue.recommended_foods || []).find(item => item.slug === slug);
+      if (!food) return;
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = t('common.loading');
+      try {
+        const result = await this._addRecommendedFoodsToPreferences([food], { refreshPool: false, panel });
+        if (result.added.length) {
+          issue.added_slugs = Array.from(new Set([...(issue.added_slugs || []), ...result.added]));
+          btn.textContent = t('plan.issue_added_notice');
+        } else {
+          btn.disabled = false;
+          btn.textContent = originalText;
+          issue.action_message = t('plan.issue_no_supported_foods');
+        }
+      } catch (error) {
+        btn.disabled = false;
+        btn.textContent = originalText;
+        alert(`${t('common.error')}: ${this._userFacingMessage(error.detail || error.message)}`);
+      }
+    });
+  });
+
+  document.getElementById('mp-closed-loop-add-all-refresh')?.addEventListener('click', async () => {
+    const foods = issue.recommended_foods || [];
+    if (!foods.length) return;
+    const btn = document.getElementById('mp-closed-loop-add-all-refresh');
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = t('common.loading');
+    try {
+      const result = await this._addRecommendedFoodsToPreferences(foods, { panel, refreshPool: true });
+      if (!result.added.length && result.skipped.length) {
+        btn.disabled = false;
+        btn.textContent = originalText;
+        issue.action_message = t('plan.issue_no_supported_foods');
+        panel.innerHTML = this._renderClosedLoopIssue(issue);
+        this._bindClosedLoopIssueActions(panel, issue);
+      }
+    } catch (error) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+      alert(`${t('common.error')}: ${this._userFacingMessage(error.detail || error.message)}`);
+    }
+  });
+};
+
+MealEnginePage._normalizePoolDish = function(dish, fallbackMealType, defaultSource = 'generated') {
   const rawIngredients = Array.isArray(dish.ingredients)
     ? dish.ingredients
     : Array.isArray(dish.parts)
@@ -623,8 +941,13 @@ MealEnginePage._normalizePoolDish = function(dish, fallbackMealType) {
   });
   return {
     dish_id: String(dish.dish_id ?? dish.sketch_id ?? `${mealType}-${ingredients.map(i => i.slug).join('-')}`),
+    recipe_id: dish.recipe_id == null ? null : Number(dish.recipe_id),
     meal_type: mealType,
     name: String(displayName || this._sketchDishName(ingredients, mealType)),
+    source: String(dish.source || defaultSource || 'generated'),
+    source_label: dish.source_label || null,
+    source_label_zh: dish.source_label_zh || '',
+    source_label_en: dish.source_label_en || '',
     ingredients,
     totals: {
       kcal: Number(totals.kcal ?? 0),
@@ -650,27 +973,45 @@ MealEnginePage._sketchDishName = function(ingredients, mealType) {
   return `${names.join(' + ')}${mealType === 'main' ? '拼盘' : '早餐'}`;
 };
 
-MealEnginePage._normalizePoolPayload = function(data, { namedWithLLM = false, source = 'named' } = {}) {
+MealEnginePage._normalizePoolPayload = function(data, { namedWithLLM = false, source = 'named', defaultDishSource = 'generated' } = {}) {
   const breakfastSource = data.breakfast_dishes || data.breakfast_pool || [];
   const mainSource = data.main_dishes || data.main_pool || [];
-  const breakfastDishes = breakfastSource.map(dish => this._normalizePoolDish(dish, 'breakfast'));
-  const mainDishes = mainSource.map(dish => this._normalizePoolDish(dish, 'main'));
+  const requiresBreakfastPool = typeof data.requires_breakfast_pool === 'boolean'
+    ? data.requires_breakfast_pool
+    : Number(data.required_slot_counts?.breakfast ?? 0) > 0;
+  const requiresMainPool = typeof data.requires_main_pool === 'boolean'
+    ? data.requires_main_pool
+    : (Number(data.required_slot_counts?.lunch ?? 0) + Number(data.required_slot_counts?.dinner ?? 0)) > 0;
+  const breakfastDishes = requiresBreakfastPool
+    ? breakfastSource.map(dish => this._normalizePoolDish(dish, 'breakfast', defaultDishSource))
+    : [];
+  const mainDishes = requiresMainPool
+    ? mainSource.map(dish => this._normalizePoolDish(dish, 'main', defaultDishSource))
+    : [];
   const startDate = data.start_date || data.week_skeleton?.[0]?.date || '';
+  const poolFingerprint = dishes => dishes.map(dish => [
+    dish.dish_id,
+    dish.name,
+    (dish.ingredient_slugs || []).join(','),
+    (dish.ingredients || []).map(item => `${item.slug}:${Number(item.grams || 0)}`).join(','),
+    Number(dish.totals?.kcal || 0),
+    Number(dish.totals?.protein_g || 0),
+    Number(dish.totals?.carbs_g || 0),
+    Number(dish.totals?.fat_g || 0),
+  ].join('~')).join('|');
+  const variant = Number(data.variant ?? 0);
   return {
-    pool_tag: `${source}:${startDate}:${breakfastDishes.map(d => d.dish_id).join('|')}:${mainDishes.map(d => d.dish_id).join('|')}`,
+    pool_tag: `${source}:${startDate}:v${variant}:${poolFingerprint(breakfastDishes)}::${poolFingerprint(mainDishes)}`,
     named_with_llm: namedWithLLM,
     source,
+    variant,
     start_date: startDate,
     breakfast_dishes: breakfastDishes,
     main_dishes: mainDishes,
     week_skeleton: Array.isArray(data.week_skeleton) ? data.week_skeleton.slice() : [],
     required_slot_counts: data.required_slot_counts || {},
-    requires_breakfast_pool: typeof data.requires_breakfast_pool === 'boolean'
-      ? data.requires_breakfast_pool
-      : Number(data.required_slot_counts?.breakfast ?? 0) > 0,
-    requires_main_pool: typeof data.requires_main_pool === 'boolean'
-      ? data.requires_main_pool
-      : (Number(data.required_slot_counts?.lunch ?? 0) + Number(data.required_slot_counts?.dinner ?? 0)) > 0,
+    requires_breakfast_pool: requiresBreakfastPool,
+    requires_main_pool: requiresMainPool,
     llm_quota: data.llm_quota || null,
     warnings: Array.isArray(data.warnings) ? data.warnings.slice() : [],
   };
@@ -684,9 +1025,143 @@ MealEnginePage._serializePoolSelection = function(selection, poolData) {
   };
 };
 
+MealEnginePage._hashText = function(text) {
+  let hash = 0;
+  const value = String(text || '');
+  for (let i = 0; i < value.length; i += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash).toString(36);
+};
+
+MealEnginePage._clonePoolDish = function(dish) {
+  try {
+    return JSON.parse(JSON.stringify(dish || {}));
+  } catch {
+    return { ...(dish || {}) };
+  }
+};
+
+MealEnginePage._poolDishSignature = function(dish) {
+  const number = value => (Number.isFinite(Number(value)) ? Number(value) : 0);
+  const ingredients = (Array.isArray(dish?.ingredients) ? dish.ingredients : [])
+    .map(item => [
+      String(item.slug || item.name || '').trim().toLowerCase(),
+      number(item.grams).toFixed(1),
+    ].join(':'))
+    .filter(item => item !== ':0.0')
+    .sort()
+    .join('|');
+  const fallbackSlugs = (Array.isArray(dish?.ingredient_slugs) ? dish.ingredient_slugs : [])
+    .map(slug => String(slug || '').trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join('|');
+  const totals = dish?.totals || {};
+  const identity = ingredients || fallbackSlugs || String(dish?.name || '').trim().toLowerCase();
+  return [
+    identity,
+    number(totals.kcal).toFixed(0),
+    number(totals.protein_g).toFixed(1),
+    number(totals.carbs_g).toFixed(1),
+    number(totals.fat_g).toFixed(1),
+  ].join('~');
+};
+
+MealEnginePage._buildPoolCarryover = function(poolData) {
+  if (!poolData) return null;
+  const buildGroup = (group, dishes) => this._selectedDishes(group, dishes || [])
+    .map((dish, index) => {
+      const copy = this._clonePoolDish(dish);
+      const signature = this._poolDishSignature(copy) || `${group}:${index}`;
+      copy.dish_id = `keep-${group}-${this._hashText(signature)}-${index}`;
+      copy.original_dish_id = String(dish.dish_id || '');
+      copy.carried_from_previous_pool = true;
+      return copy;
+    });
+  const carryover = {
+    breakfast: this._requiresBreakfastPool(poolData) ? buildGroup('breakfast', poolData.breakfast_dishes) : [],
+    main: this._requiresMainPool(poolData) ? buildGroup('main', poolData.main_dishes) : [],
+  };
+  return carryover.breakfast.length || carryover.main.length ? carryover : null;
+};
+
+MealEnginePage._mergePoolCarryover = function(poolData) {
+  const carryover = this._cache.pool_carryover;
+  this._cache.pool_carryover = null;
+  if (!carryover) return poolData;
+
+  const mergeGroup = (group, currentDishes) => {
+    const current = Array.isArray(currentDishes) ? currentDishes : [];
+    const kept = [];
+    const keptSignatures = new Set();
+    (carryover[group] || []).forEach((dish, index) => {
+      const signature = this._poolDishSignature(dish);
+      if (!signature || keptSignatures.has(signature)) return;
+      const copy = this._clonePoolDish(dish);
+      copy.dish_id = `keep-${group}-${this._hashText(signature)}-${index}`;
+      copy.carried_from_previous_pool = true;
+      kept.push(copy);
+      keptSignatures.add(signature);
+    });
+    const rest = current.filter(dish => !keptSignatures.has(this._poolDishSignature(dish)));
+    return { dishes: [...kept, ...rest], count: kept.length, signatures: kept.map(dish => this._poolDishSignature(dish)) };
+  };
+
+  const breakfast = this._requiresBreakfastPool(poolData)
+    ? mergeGroup('breakfast', poolData.breakfast_dishes)
+    : { dishes: [], count: 0, signatures: [] };
+  const main = this._requiresMainPool(poolData)
+    ? mergeGroup('main', poolData.main_dishes)
+    : { dishes: [], count: 0, signatures: [] };
+  const total = breakfast.count + main.count;
+  if (!total) return poolData;
+
+  return {
+    ...poolData,
+    pool_tag: `${poolData.pool_tag}:keep:${this._hashText([...breakfast.signatures, ...main.signatures].join('|'))}`,
+    breakfast_dishes: breakfast.dishes,
+    main_dishes: main.dishes,
+    carryover_counts: {
+      breakfast: breakfast.count,
+      main: main.count,
+      total,
+    },
+  };
+};
+
+MealEnginePage._storageUserScope = function() {
+  const user = (typeof App !== 'undefined' && App._user) ? App._user : null;
+  if (user?.id != null) return `user:${user.id}`;
+  const token = localStorage.getItem('ch_access_token') || '';
+  let hash = 0;
+  for (let i = 0; i < token.length; i += 1) {
+    hash = ((hash << 5) - hash + token.charCodeAt(i)) | 0;
+  }
+  return token ? `token:${Math.abs(hash)}` : 'anonymous';
+};
+
+MealEnginePage._poolHistoryStorageKey = function() {
+  return `${this._POOL_HISTORY_STORAGE_KEY}:${this._storageUserScope()}`;
+};
+
+MealEnginePage._syncPoolHistoryScope = function() {
+  const key = this._poolHistoryStorageKey();
+  if (this._cache.pool_history_key === key) return;
+  this._cache.pool_history_key = key;
+  this._cache.pool_history = null;
+  this._cache.meal_plan_pool = null;
+  this._cache.pool_selection = null;
+  this._cache.pool_carryover = null;
+  this._cache.arranged_plan = null;
+  this._cache.arrange_issue = null;
+  this._cache.pool_variant = 0;
+  this._cache.pool_source_filter = 'all';
+};
+
 MealEnginePage._loadPoolHistory = function() {
   try {
-    const raw = localStorage.getItem(this._POOL_HISTORY_STORAGE_KEY);
+    const raw = localStorage.getItem(this._poolHistoryStorageKey());
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -698,7 +1173,7 @@ MealEnginePage._loadPoolHistory = function() {
 
 MealEnginePage._savePoolHistory = function(history) {
   const trimmed = Array.isArray(history) ? history.slice(0, this._POOL_HISTORY_LIMIT) : [];
-  localStorage.setItem(this._POOL_HISTORY_STORAGE_KEY, JSON.stringify(trimmed));
+  localStorage.setItem(this._poolHistoryStorageKey(), JSON.stringify(trimmed));
   this._cache.pool_history = trimmed;
 };
 
@@ -715,8 +1190,7 @@ MealEnginePage._archiveCurrentPool = function(reason = 'refresh') {
     arranged_plan: this._cache.arranged_plan || null,
   };
 
-  const history = this._loadPoolHistory()
-    .filter(item => item?.pool?.pool_tag !== pool.pool_tag);
+  const history = this._loadPoolHistory();
   history.unshift(snapshot);
   this._savePoolHistory(history);
 };
@@ -726,13 +1200,19 @@ MealEnginePage._restorePoolSnapshot = async function(snapshotId, panel) {
   if (!snapshot?.pool) return;
 
   this._cache.meal_plan_pool = snapshot.pool;
+  this._cache.pool_carryover = null;
   this._cache.pool_selection = {
     pool_tag: snapshot.selection?.pool_tag || snapshot.pool.pool_tag,
-    breakfast: new Set(snapshot.selection?.breakfast || snapshot.pool.breakfast_dishes.map(dish => dish.dish_id)),
-    main: new Set(snapshot.selection?.main || snapshot.pool.main_dishes.map(dish => dish.dish_id)),
+    breakfast: snapshot.pool.requires_breakfast_pool === false
+      ? new Set()
+      : new Set(snapshot.selection?.breakfast || snapshot.pool.breakfast_dishes.map(dish => dish.dish_id)),
+    main: snapshot.pool.requires_main_pool === false
+      ? new Set()
+      : new Set(snapshot.selection?.main || snapshot.pool.main_dishes.map(dish => dish.dish_id)),
   };
   this._cache.arranged_plan = snapshot.arranged_plan || null;
   this._cache.arrange_issue = null;
+  this._cache.pool_source_filter = 'all';
 
   await this._renderMealPlanFromCache(panel, snapshot.pool);
   I18n.apply();
@@ -751,10 +1231,14 @@ MealEnginePage._renderPoolHistory = function() {
   const t = k => I18n.t(k);
   const cards = history.map(item => {
     const pool = item.pool || {};
-    const breakfastCount = Array.isArray(item.selection?.breakfast)
+    const breakfastCount = pool.requires_breakfast_pool === false
+      ? 0
+      : Array.isArray(item.selection?.breakfast)
       ? item.selection.breakfast.length
       : (pool.breakfast_dishes || []).length;
-    const mainCount = Array.isArray(item.selection?.main)
+    const mainCount = pool.requires_main_pool === false
+      ? 0
+      : Array.isArray(item.selection?.main)
       ? item.selection.main.length
       : (pool.main_dishes || []).length;
     return `
@@ -782,22 +1266,30 @@ MealEnginePage._renderPoolHistory = function() {
 };
 
 MealEnginePage._ensureMealPlanPool = async function() {
+  this._syncPoolHistoryScope();
   if (this._cache.meal_plan_pool) return this._cache.meal_plan_pool;
   this._cache.pool_history = this._cache.pool_history || this._loadPoolHistory();
+  const variant = Number(this._cache.pool_variant || 0);
 
   let normalized;
   try {
-    const named = await API.nameMealPlanPool();
+    const named = await API.nameMealPlanPool(variant);
     normalized = this._normalizePoolPayload(named, { namedWithLLM: true, source: 'named' });
   } catch (err) {
-    const raw = await API.getMealPlanPool();
+    const raw = await API.getMealPlanPool(variant);
     normalized = this._normalizePoolPayload(raw, { namedWithLLM: false, source: 'sketch' });
     normalized.warnings.unshift(I18n.t('plan.pool_fallback_warning'));
     const warningMessage = this._userFacingMessage(err?.detail || err?.message);
     if (warningMessage) normalized.warnings.push(warningMessage);
   }
 
+  normalized = this._mergePoolCarryover(normalized);
   this._cache.meal_plan_pool = normalized;
+  // display-v2 wiring: the weekly menu overview shows the agent's stored
+  // week; hydrate it so the arranged section is populated on first render.
+  if (!this._cache.arranged_plan && typeof API.getStoredArrangedWeek === 'function') {
+    this._cache.arranged_plan = await API.getStoredArrangedWeek().catch(() => null);
+  }
   this._cache.arranged_plan = this._cache.arranged_plan || null;
   this._initPoolSelection(normalized);
   return normalized;
@@ -852,6 +1344,77 @@ MealEnginePage._poolSelectionMessage = function(poolData) {
   return I18n.t('plan.pool_arrange_hint');
 };
 
+MealEnginePage._poolSourceFilterOptions = function() {
+  return [
+    { key: 'all', label: I18n.t('plan.pool_source_all') },
+    { key: 'generated', label: I18n.t('plan.pool_source_generated') },
+    { key: 'library', label: I18n.t('plan.pool_source_library') },
+    { key: 'supplement', label: I18n.t('plan.pool_source_supplement') },
+  ];
+};
+
+MealEnginePage._poolSourceKey = function(dish) {
+  const raw = String(dish?.source || '').trim().toLowerCase();
+  if (!raw) return 'generated';
+  if (['generated', 'fresh', 'named', 'sketch', 'solver', 'llm', 'llm_generated'].includes(raw)) return 'generated';
+  if (['library', 'recipe_library', 'saved_library', 'saved', 'saved_recipe', 'recipe'].includes(raw)) return 'library';
+  if (['supplement', 'supplemental', 'supplemented', 'pool_supplement', 'supplemental_pool'].includes(raw)) return 'supplement';
+  return raw;
+};
+
+MealEnginePage._poolSourceLabel = function(dish) {
+  const lang = I18n.lang;
+  const label = dish?.source_label;
+  if (label && typeof label === 'object') {
+    return label[lang] || label[`label_${lang}`] || label.label || label.en || label.zh || '';
+  }
+  if (label) return String(label);
+  const localized = dish?.[`source_label_${lang}`] || dish?.source_label_en || dish?.source_label_zh;
+  if (localized) return String(localized);
+  const key = this._poolSourceKey(dish);
+  return ({
+    generated: I18n.t('plan.pool_source_generated'),
+    library: I18n.t('plan.pool_source_library'),
+    supplement: I18n.t('plan.pool_source_supplement'),
+  })[key] || String(dish?.source || key);
+};
+
+MealEnginePage._poolSourceCounts = function(poolData) {
+  const counts = { all: 0, generated: 0, library: 0, supplement: 0 };
+  const breakfast = this._requiresBreakfastPool(poolData) ? (poolData.breakfast_dishes || []) : [];
+  const main = this._requiresMainPool(poolData) ? (poolData.main_dishes || []) : [];
+  [...breakfast, ...main].forEach(dish => {
+    counts.all += 1;
+    const key = this._poolSourceKey(dish);
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  return counts;
+};
+
+MealEnginePage._visiblePoolDishes = function(dishes) {
+  const active = this._cache.pool_source_filter || 'all';
+  if (active === 'all') return dishes || [];
+  return (dishes || []).filter(dish => this._poolSourceKey(dish) === active);
+};
+
+MealEnginePage._renderPoolSourceFilters = function(poolData) {
+  const active = this._cache.pool_source_filter || 'all';
+  const counts = this._poolSourceCounts(poolData);
+  const buttons = this._poolSourceFilterOptions().map(option => {
+    const isActive = option.key === active;
+    const cls = isActive ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm';
+    const count = counts[option.key] || 0;
+    return `
+      <button type="button" class="${cls}" data-pool-source-filter="${this._esc(option.key)}" aria-pressed="${isActive ? 'true' : 'false'}">
+        ${this._esc(option.label)} ${count}
+      </button>`;
+  }).join('');
+  return `
+    <div class="pool-source-filter" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+      ${buttons}
+    </div>`;
+};
+
 MealEnginePage._updatePoolSummary = function(panel, poolData) {
   const breakfastCount = this._selectedCount('breakfast');
   const mainCount = this._selectedCount('main');
@@ -876,13 +1439,36 @@ MealEnginePage._updatePoolSummary = function(panel, poolData) {
 };
 
 MealEnginePage._refreshMealPlanPool = async function(panel, reason = 'refresh') {
+  this._cache.pool_carryover = reason === 'refresh'
+    ? this._buildPoolCarryover(this._cache.meal_plan_pool)
+    : null;
   this._archiveCurrentPool(reason);
+  this._cache.pool_variant = Number(this._cache.pool_variant || 0) + 1;
   this._cache.meal_plan_pool = null;
   this._cache.pool_selection = null;
   this._cache.arranged_plan = null;
   this._cache.arrange_issue = null;
+  this._cache.pool_source_filter = 'all';
   await this._renderMealPlan(panel);
   I18n.apply();
+};
+
+MealEnginePage._showRefreshPoolConfirm = function(panel) {
+  App.openModal(
+    I18n.t('plan.pool_refresh_btn'),
+    `<p style="margin:0;color:var(--text-2);line-height:1.65">
+       ${this._esc(I18n.t('plan.pool_refresh_confirm'))}
+     </p>`,
+    `<button class="btn btn-ghost" id="pool-refresh-cancel">${I18n.t('common.cancel')}</button>
+     <button class="btn btn-primary" id="pool-refresh-confirm">${I18n.t('plan.pool_refresh_btn')}</button>`
+  );
+
+  document.getElementById('pool-refresh-cancel')?.addEventListener('click', () => App.closeModal());
+  document.getElementById('pool-refresh-confirm')?.addEventListener('click', async e => {
+    e.currentTarget.disabled = true;
+    App.closeModal();
+    await this._refreshMealPlanPool(panel, 'refresh');
+  });
 };
 
 MealEnginePage._collectRecommendedFoods = function(missingMicronutrients = []) {
@@ -916,7 +1502,41 @@ MealEnginePage._collectRecommendedFoods = function(missingMicronutrients = []) {
   return Array.from(seen.values());
 };
 
+MealEnginePage._normalizeRecommendedFood = function(food) {
+  if (!food) return null;
+  const slug = typeof food === 'string' ? food : food.slug;
+  if (!slug) return null;
+  return {
+    ...(typeof food === 'object' ? food : {}),
+    slug,
+    name_zh: food.name_zh || food.name || slug,
+    name_en: food.name_en || food.name || slug,
+    roles: Array.isArray(food.roles) ? food.roles.slice() : [],
+    role_labels_zh: Array.isArray(food.role_labels_zh) ? food.role_labels_zh.slice() : [],
+    role_labels_en: Array.isArray(food.role_labels_en) ? food.role_labels_en.slice() : [],
+  };
+};
+
+MealEnginePage._isArrangeActionError = function(error) {
+  return [
+    'weekly_micronutrients_missing',
+    'selection_cannot_cover_reinforcement_day',
+    'breakfast_pool_empty',
+    'main_pool_empty',
+    'arrangement_failed',
+  ].includes(error);
+};
+
 MealEnginePage._normalizeArrangeIssue = function(detail) {
+  if (typeof detail === 'string') {
+    const text = detail.trim();
+    if (text.startsWith('{')) {
+      try { detail = JSON.parse(text); } catch { detail = { message_zh: text, message_en: text }; }
+    } else {
+      detail = { message_zh: text, message_en: text };
+    }
+  }
+  detail = detail && typeof detail === 'object' ? detail : {};
   const micronutrients = detail?.micronutrients || {};
   const missingMicronutrients = Array.isArray(detail?.missing_micronutrients) && detail.missing_micronutrients.length
     ? detail.missing_micronutrients.map(item => ({
@@ -945,15 +1565,31 @@ MealEnginePage._normalizeArrangeIssue = function(detail) {
         }));
 
   const recommendedFoods = Array.isArray(detail?.recommended_foods) && detail.recommended_foods.length
-    ? detail.recommended_foods.map(food => ({
-        slug: food.slug,
-        name_zh: food.name_zh || food.slug,
-        name_en: food.name_en || food.slug,
-        roles: Array.isArray(food.roles) ? food.roles.slice() : [],
-        role_labels_zh: Array.isArray(food.role_labels_zh) ? food.role_labels_zh.slice() : [],
-        role_labels_en: Array.isArray(food.role_labels_en) ? food.role_labels_en.slice() : [],
-      }))
+    ? detail.recommended_foods
     : this._collectRecommendedFoods(missingMicronutrients);
+  const normalizedRecommendedFoods = recommendedFoods
+    .map(food => this._normalizeRecommendedFood(food))
+    .filter(Boolean);
+
+  const poolGaps = [
+    ...(Array.isArray(detail?.missing_buckets) ? detail.missing_buckets : []),
+    ...(Array.isArray(detail?.required_buckets) ? detail.required_buckets : []),
+    ...(Array.isArray(detail?.blocking_buckets) ? detail.blocking_buckets : []),
+  ].map(item => {
+    if (typeof item === 'string') {
+      return { key: item, label_zh: item, label_en: item };
+    }
+    return {
+      key: item.bucket || item.key || item.day_type || '',
+      label_zh: item.label_zh || item.name_zh || item.bucket || item.key || item.day_type || '',
+      label_en: item.label_en || item.name_en || item.bucket || item.key || item.day_type || '',
+    };
+  }).filter(item => item.key || item.label_zh || item.label_en);
+  const missingRoles = missingMicronutrients.map(item => item.role).filter(Boolean);
+  const requiredBuckets = [
+    ...(Array.isArray(detail?.required_buckets) ? detail.required_buckets : []),
+    ...poolGaps.map(item => item.key),
+  ].map(item => String(item || '').trim()).filter(Boolean);
 
   return {
     error: detail?.error || 'weekly_micronutrients_missing',
@@ -962,7 +1598,10 @@ MealEnginePage._normalizeArrangeIssue = function(detail) {
     warnings: Array.isArray(detail?.warnings) ? detail.warnings.slice() : [],
     micronutrients,
     missing_micronutrients: missingMicronutrients,
-    recommended_foods: recommendedFoods,
+    missing_roles: Array.from(new Set(missingRoles)),
+    required_buckets: Array.from(new Set(requiredBuckets)),
+    pool_gaps: poolGaps,
+    recommended_foods: normalizedRecommendedFoods,
     added_slugs: [],
     action_message: '',
   };
@@ -1002,6 +1641,7 @@ MealEnginePage._addRecommendedFoodsToPreferences = async function(foods, { refre
   }
 
   await API.saveFoodPreferences(items, { replace: false });
+  this._cache.preference_catalog = null;
   const added = items.map(item => item.item_key);
   if (refreshPool && panel) {
     await this._refreshMealPlanPool(panel, 'preferences_update');
@@ -1009,17 +1649,207 @@ MealEnginePage._addRecommendedFoodsToPreferences = async function(foods, { refre
   return { added, skipped };
 };
 
+MealEnginePage._extractSupplementPoolPayload = function(data) {
+  const root = data?.pool || data?.supplemented_pool || data?.supplement_pool || data || {};
+  let breakfast = root.supplemental_breakfast_dishes
+    || root.added_breakfast_dishes
+    || root.breakfast_dishes
+    || root.breakfast_pool
+    || [];
+  let main = root.supplemental_main_dishes
+    || root.added_main_dishes
+    || root.main_dishes
+    || root.main_pool
+    || [];
+
+  const flat = root.dishes || root.candidates || root.items || [];
+  if ((!breakfast.length || !main.length) && Array.isArray(flat)) {
+    if (!breakfast.length) breakfast = flat.filter(dish => dish?.meal_type === 'breakfast');
+    if (!main.length) main = flat.filter(dish => dish?.meal_type === 'main' || dish?.meal_type === 'lunch' || dish?.meal_type === 'dinner');
+  }
+
+  return {
+    ...root,
+    breakfast_dishes: Array.isArray(breakfast) ? breakfast : [],
+    main_dishes: Array.isArray(main) ? main : [],
+  };
+};
+
+MealEnginePage._buildSupplementPoolBody = function(issue, foods, poolData) {
+  const selectedBreakfast = this._selectedDishes('breakfast', poolData.breakfast_dishes || []);
+  const selectedMain = this._selectedDishes('main', poolData.main_dishes || []);
+  const recommendedFoods = (foods || [])
+    .map(food => this._normalizeRecommendedFood(food))
+    .filter(Boolean);
+  const selectedFoodSlugs = recommendedFoods.map(food => food.slug);
+  return {
+    error: issue?.error || null,
+    issue,
+    missing_roles: Array.isArray(issue?.missing_roles) ? issue.missing_roles.slice() : [],
+    required_buckets: Array.isArray(issue?.required_buckets) ? issue.required_buckets.slice() : [],
+    selected_foods: recommendedFoods,
+    selected_food_slugs: selectedFoodSlugs,
+    recommended_foods: recommendedFoods,
+    current_pool: {
+      pool_tag: poolData.pool_tag,
+      source: poolData.source,
+      variant: poolData.variant,
+      start_date: poolData.start_date,
+      week_skeleton: poolData.week_skeleton || [],
+      required_slot_counts: poolData.required_slot_counts || {},
+      requires_breakfast_pool: !!poolData.requires_breakfast_pool,
+      requires_main_pool: !!poolData.requires_main_pool,
+      breakfast_dishes: poolData.breakfast_dishes || [],
+      main_dishes: poolData.main_dishes || [],
+    },
+    selection: this._serializePoolSelection(this._cache.pool_selection, poolData),
+    selected_breakfast_dishes: selectedBreakfast,
+    selected_main_dishes: selectedMain,
+    breakfast_dishes: poolData.breakfast_dishes || [],
+    main_dishes: poolData.main_dishes || [],
+  };
+};
+
+MealEnginePage._mergeSupplementPool = function(response, poolData) {
+  const current = poolData || this._cache.meal_plan_pool;
+  if (!current) return { breakfast: 0, main: 0, total: 0 };
+  const payload = this._extractSupplementPoolPayload(response);
+  const supplement = this._normalizePoolPayload({
+    ...payload,
+    week_skeleton: payload.week_skeleton || current.week_skeleton || [],
+    required_slot_counts: payload.required_slot_counts || current.required_slot_counts || {},
+    requires_breakfast_pool: typeof payload.requires_breakfast_pool === 'boolean'
+      ? payload.requires_breakfast_pool
+      : current.requires_breakfast_pool,
+    requires_main_pool: typeof payload.requires_main_pool === 'boolean'
+      ? payload.requires_main_pool
+      : current.requires_main_pool,
+    start_date: payload.start_date || current.start_date,
+    variant: payload.variant ?? current.variant,
+  }, { namedWithLLM: current.named_with_llm, source: 'supplement', defaultDishSource: 'supplement' });
+
+  const selection = this._cache.pool_selection || {
+    breakfast: new Set((current.breakfast_dishes || []).map(dish => dish.dish_id)),
+    main: new Set((current.main_dishes || []).map(dish => dish.dish_id)),
+  };
+
+  const mergeGroup = (group, existingDishes, incomingDishes) => {
+    const existing = Array.isArray(existingDishes) ? existingDishes : [];
+    const existingIds = new Set(existing.map(dish => String(dish.dish_id || '')));
+    const existingSignatures = new Set(existing.map(dish => this._poolDishSignature(dish)).filter(Boolean));
+    const added = [];
+    (incomingDishes || []).forEach((dish, index) => {
+      const copy = this._clonePoolDish(dish);
+      copy.source = copy.source || 'supplement';
+      const signature = this._poolDishSignature(copy);
+      if (signature && existingSignatures.has(signature)) return;
+      if (!copy.dish_id || existingIds.has(String(copy.dish_id))) {
+        copy.dish_id = `supplement-${group}-${this._hashText(signature || copy.name || index)}-${index}`;
+      }
+      copy.source = copy.source || 'supplement';
+      copy.source_label = copy.source_label || null;
+      existingIds.add(String(copy.dish_id));
+      if (signature) existingSignatures.add(signature);
+      added.push(copy);
+    });
+    return { dishes: [...added, ...existing], added };
+  };
+
+  const breakfast = this._requiresBreakfastPool(current)
+    ? mergeGroup('breakfast', current.breakfast_dishes, supplement.breakfast_dishes)
+    : { dishes: [], added: [] };
+  const main = this._requiresMainPool(current)
+    ? mergeGroup('main', current.main_dishes, supplement.main_dishes)
+    : { dishes: [], added: [] };
+  const supplementSignatures = [...breakfast.added, ...main.added]
+    .map(dish => this._poolDishSignature(dish))
+    .filter(Boolean)
+    .join('|');
+  const total = breakfast.added.length + main.added.length;
+  const nextPoolTag = `${current.pool_tag}:supplement:${this._hashText(supplementSignatures || Date.now())}`;
+
+  const breakfastSelection = this._requiresBreakfastPool(current) ? new Set(selection.breakfast || []) : new Set();
+  const mainSelection = this._requiresMainPool(current) ? new Set(selection.main || []) : new Set();
+  breakfast.added.forEach(dish => breakfastSelection.add(dish.dish_id));
+  main.added.forEach(dish => mainSelection.add(dish.dish_id));
+
+  this._cache.meal_plan_pool = {
+    ...current,
+    pool_tag: nextPoolTag,
+    breakfast_dishes: breakfast.dishes,
+    main_dishes: main.dishes,
+    warnings: [
+      ...(current.warnings || []),
+      ...(supplement.warnings || []),
+    ],
+    supplement_counts: {
+      breakfast: Number(current.supplement_counts?.breakfast || 0) + breakfast.added.length,
+      main: Number(current.supplement_counts?.main || 0) + main.added.length,
+      total: Number(current.supplement_counts?.total || 0) + total,
+    },
+  };
+  this._cache.pool_selection = {
+    pool_tag: nextPoolTag,
+    breakfast: breakfastSelection,
+    main: mainSelection,
+  };
+  if (total > 0) {
+    this._cache.pool_source_filter = 'supplement';
+  }
+  return { breakfast: breakfast.added.length, main: main.added.length, total };
+};
+
+MealEnginePage._addFoodsAndSupplementPool = async function(panel, poolData, issue, foods) {
+  const result = await this._addRecommendedFoodsToPreferences(foods, { panel, refreshPool: false });
+  const addedSet = new Set(issue.added_slugs || []);
+  result.added.forEach(item => addedSet.add(item));
+  issue.added_slugs = Array.from(addedSet);
+  if (!result.added.length) {
+    issue.action_message = result.skipped.length
+      ? I18n.t('plan.issue_no_supported_foods')
+      : I18n.t('plan.issue_no_recommendations');
+    return { preference: result, supplement: { breakfast: 0, main: 0, total: 0 } };
+  }
+
+  const addedFoods = (foods || []).filter(food => result.added.includes((typeof food === 'string' ? food : food?.slug)));
+  const activePool = this._cache.meal_plan_pool || poolData;
+  const response = await API.supplementMealPlanPool(this._buildSupplementPoolBody(issue, addedFoods, activePool));
+  const counts = this._mergeSupplementPool(response, activePool);
+  issue.action_message = counts.total
+    ? I18n.t('plan.issue_supplement_added')
+        .replace('{b}', counts.breakfast)
+        .replace('{m}', counts.main)
+    : I18n.t('plan.issue_supplement_empty');
+  this._cache.arrange_issue = issue;
+  return { preference: result, supplement: counts };
+};
+
 MealEnginePage._renderArrangeIssue = function(issue) {
-  if (!issue || issue.error !== 'weekly_micronutrients_missing') return '';
+  if (!issue) return '';
   const t = k => I18n.t(k);
   const lang = I18n.lang;
-  const missingRows = (issue.missing_micronutrients || []).map(item => `
+  const title = ({
+    weekly_micronutrients_missing: t('plan.issue_title'),
+    selection_cannot_cover_reinforcement_day: t('plan.issue_reinforcement_title'),
+    breakfast_pool_empty: t('plan.issue_breakfast_empty_title'),
+    main_pool_empty: t('plan.issue_main_empty_title'),
+    arrangement_failed: t('plan.issue_arrangement_failed_title'),
+  })[issue.error] || t('plan.issue_arrangement_failed_title');
+  const microRows = (issue.missing_micronutrients || []).map(item => `
     <div class="plan-issue-row">
       <div>
         <strong>${this._esc(item[`label_${lang}`] || item.label_en || item.role)}</strong>
         <div class="muted">${t('plan.issue_gap').replace('{a}', item.actual ?? 0).replace('{t}', item.target ?? 0).replace('{u}', item.unit || '')}</div>
       </div>
     </div>`).join('');
+  const poolGapRows = (issue.pool_gaps || []).map(item => `
+    <div class="plan-issue-row">
+      <div>
+        <strong>${this._esc(item[`label_${lang}`] || item.label_en || item.key)}</strong>
+        <div class="muted">${t('plan.issue_pool_gap_hint')}</div>
+      </div>
+    </div>`).join('');
+  const missingRows = microRows || poolGapRows || `<div class="muted">${t('plan.issue_pool_gap_hint')}</div>`;
 
   const allAdded = (issue.recommended_foods || []).length > 0
     && issue.recommended_foods.every(food => (issue.added_slugs || []).includes(food.slug));
@@ -1034,7 +1864,7 @@ MealEnginePage._renderArrangeIssue = function(issue) {
           <div class="muted">${this._esc(roleLabels.join(lang === 'zh' ? '、' : ', '))}</div>
         </div>
         <button type="button" class="btn btn-sm" data-pref-add="${this._esc(food.slug)}" ${added ? 'disabled' : ''}>
-          ${added ? t('plan.issue_added_notice') : t('plan.issue_add_pref_btn')}
+          ${added ? t('plan.issue_added_notice') : t('plan.issue_add_pref_and_supplement_btn')}
         </button>
       </div>`;
   }).join('');
@@ -1043,11 +1873,11 @@ MealEnginePage._renderArrangeIssue = function(issue) {
     <div class="card plan-issue-card">
       <div class="flex-row">
         <div>
-          <h4>${t('plan.issue_title')}</h4>
+          <h4>${this._esc(title)}</h4>
           <div class="muted">${this._esc(issue[`message_${lang}`] || issue.message_en || '')}</div>
         </div>
         <button type="button" class="btn btn-primary btn-sm" id="mp-add-all-pref-refresh" ${allAdded || !(issue.recommended_foods || []).length ? 'disabled' : ''}>
-          ${t('plan.issue_add_all_and_refresh')}
+          ${t('plan.issue_add_all_and_supplement')}
         </button>
       </div>
       ${issue.action_message ? `<div class="plan-issue-feedback">${this._esc(issue.action_message)}</div>` : ''}
@@ -1083,6 +1913,13 @@ MealEnginePage._formatAffinityChips = function(dish) {
 MealEnginePage._renderPoolDishCard = function(dish, group) {
   const checked = this._isDishSelected(group, dish.dish_id) ? 'checked' : '';
   const totals = dish.totals || {};
+  const carryoverBadge = dish.carried_from_previous_pool
+    ? `<span class="pill ok">${I18n.t('plan.pool_carryover_badge')}</span>`
+    : '';
+  const sourceKey = this._poolSourceKey(dish);
+  const sourceClass = sourceKey === 'supplement' ? 'warn' : (sourceKey === 'library' ? 'ok' : '');
+  const sourceBadge = `<span class="pill ${sourceClass}" title="${this._esc(dish.source || sourceKey)}">${this._esc(this._poolSourceLabel(dish))}</span>`;
+  const chips = `${sourceBadge}${carryoverBadge}${this._formatAffinityChips(dish)}`;
   const details = dish.method_steps || (dish.seasonings || []).length
     ? `<details class="pool-dish-details">
          <summary>${I18n.t('plan.pool_view_recipe')}</summary>
@@ -1106,7 +1943,7 @@ MealEnginePage._renderPoolDishCard = function(dish, group) {
             <strong>${this._esc(dish.name)}</strong>
             <span class="muted">${this._macroSummary(totals)}</span>
           </div>
-          <div class="pool-chip-row">${this._formatAffinityChips(dish)}</div>
+          <div class="pool-chip-row">${chips}</div>
         </div>
       </div>
       ${details}
@@ -1155,9 +1992,7 @@ MealEnginePage._renderArrangedWeek = function(plan) {
   if (!plan || !Array.isArray(plan.days) || !plan.days.length) return '';
   const t = k => I18n.t(k);
   const lang = I18n.lang;
-  const warningHtml = (plan.warnings || []).length
-    ? `<div class="card"><h4>${t('plan.warnings')}</h4><ul class="plan-list">${plan.warnings.map(w => `<li>${this._esc(this._userFacingMessage(w) || w)}</li>`).join('')}</ul></div>`
-    : '';
+  const warningHtml = this._renderWarningCard(plan.warnings || [], t('plan.warnings'));
   const dayCards = plan.days.map(day => {
     const mealBlocks = ['breakfast', 'lunch', 'dinner'].map(mt => {
       const meal = day.meals?.[mt];
@@ -1222,12 +2057,32 @@ MealEnginePage._renderMealPlanFromCache = async function(panel, poolData) {
         .replace('{r}', quota.remaining ?? 0)
         .replace('{l}', quota.limit ?? 0)
     : t(poolData.named_with_llm ? 'plan.pool_named_notice' : 'plan.pool_sketch_notice');
-  const warningsHtml = (poolData.warnings || []).length
-    ? `<div class="card"><h4>${t('plan.warnings')}</h4><ul class="plan-list">${poolData.warnings.map(w => `<li>${this._esc(this._userFacingMessage(w) || w)}</li>`).join('')}</ul></div>`
-    : '';
+  const warningsHtml = this._renderWarningCard(poolData.warnings || [], t('plan.warnings'));
   const historyHtml = this._renderPoolHistory();
-  const breakfastCards = poolData.breakfast_dishes.map(dish => this._renderPoolDishCard(dish, 'breakfast')).join('');
-  const mainCards = poolData.main_dishes.map(dish => this._renderPoolDishCard(dish, 'main')).join('');
+  const carryoverCount = Number(poolData.carryover_counts?.total || 0);
+  const carryoverPill = carryoverCount
+    ? `<span class="pill ok">${t('plan.pool_carryover_summary').replace('{n}', carryoverCount)}</span>`
+    : '';
+  const sourceFiltersHtml = this._renderPoolSourceFilters(poolData);
+  const showBreakfastPool = this._requiresBreakfastPool(poolData);
+  const showMainPool = this._requiresMainPool(poolData);
+  const visibleBreakfastDishes = showBreakfastPool ? this._visiblePoolDishes(poolData.breakfast_dishes) : [];
+  const visibleMainDishes = showMainPool ? this._visiblePoolDishes(poolData.main_dishes) : [];
+  const breakfastCards = visibleBreakfastDishes.map(dish => this._renderPoolDishCard(dish, 'breakfast')).join('');
+  const mainCards = visibleMainDishes.map(dish => this._renderPoolDishCard(dish, 'main')).join('');
+  const breakfastSummaryPill = showBreakfastPool ? '<span class="pill ok" data-pool-breakfast-count></span>' : '';
+  const mainSummaryPill = showMainPool ? '<span class="pill ok" data-pool-main-count></span>' : '';
+  const breakfastSection = showBreakfastPool ? `
+    <div class="card">
+      <h4>${t('plan.pool_breakfast_section')}</h4>
+      <div class="muted">${t('plan.pool_default_selected')}</div>
+      <div class="pool-dish-grid">${breakfastCards || `<div class="muted">${t('plan.no_candidates')}</div>`}</div>
+    </div>` : '';
+  const mainSection = showMainPool ? `
+    <div class="card">
+      <h4>${t('plan.pool_main_section')}</h4>
+      <div class="pool-dish-grid">${mainCards || `<div class="muted">${t('plan.no_candidates')}</div>`}</div>
+    </div>` : '';
   const issueHtml = this._cache.arrange_issue
     ? this._renderArrangeIssue(this._cache.arrange_issue)
     : '';
@@ -1248,23 +2103,18 @@ MealEnginePage._renderMealPlanFromCache = async function(panel, poolData) {
         </div>
       </div>
       <div class="pool-selection-summary">
-        <span class="pill ok" data-pool-breakfast-count></span>
-        <span class="pill ok" data-pool-main-count></span>
+        ${breakfastSummaryPill}
+        ${mainSummaryPill}
+        ${carryoverPill}
       </div>
       <div class="muted" data-pool-arrange-hint>${t('plan.pool_arrange_hint')}</div>
+      ${sourceFiltersHtml}
     </div>
     ${warningsHtml}
     ${historyHtml}
     ${this._renderWeekSkeleton(poolData.week_skeleton)}
-    <div class="card">
-      <h4>${t('plan.pool_breakfast_section')}</h4>
-      <div class="muted">${t('plan.pool_default_selected')}</div>
-      <div class="pool-dish-grid">${breakfastCards || `<div class="muted">${t('plan.no_candidates')}</div>`}</div>
-    </div>
-    <div class="card">
-      <h4>${t('plan.pool_main_section')}</h4>
-      <div class="pool-dish-grid">${mainCards || `<div class="muted">${t('plan.no_candidates')}</div>`}</div>
-    </div>
+    ${breakfastSection}
+    ${mainSection}
     <div class="card">
       <div class="flex-row">
         <div>
@@ -1281,8 +2131,15 @@ MealEnginePage._renderMealPlanFromCache = async function(panel, poolData) {
   this._updatePoolSummary(panel, poolData);
 
   document.getElementById('mp-refresh-pool')?.addEventListener('click', async () => {
-    if (!confirm(t('plan.pool_refresh_confirm'))) return;
-    await this._refreshMealPlanPool(panel, 'refresh');
+    this._showRefreshPoolConfirm(panel);
+  });
+
+  panel.querySelectorAll('[data-pool-source-filter]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      this._cache.pool_source_filter = btn.getAttribute('data-pool-source-filter') || 'all';
+      await this._renderMealPlanFromCache(panel, poolData);
+      I18n.apply();
+    });
   });
 
   panel.querySelectorAll('[data-pool-restore]').forEach(btn => {
@@ -1310,12 +2167,25 @@ MealEnginePage._renderMealPlanFromCache = async function(panel, poolData) {
   });
 
   document.getElementById('mp-arrange')?.addEventListener('click', async () => {
-    const breakfast = this._selectedDishes('breakfast', poolData.breakfast_dishes);
-    const main = this._selectedDishes('main', poolData.main_dishes);
+    const breakfast = this._requiresBreakfastPool(poolData)
+      ? this._selectedDishes('breakfast', poolData.breakfast_dishes)
+      : [];
+    const main = this._requiresMainPool(poolData)
+      ? this._selectedDishes('main', poolData.main_dishes)
+      : [];
     const breakfastMissing = this._requiresBreakfastPool(poolData) && !breakfast.length;
     const mainMissing = this._requiresMainPool(poolData) && !main.length;
     if (breakfastMissing || mainMissing) {
-      alert(this._poolSelectionMessage(poolData));
+      const error = breakfastMissing && mainMissing
+        ? 'arrangement_failed'
+        : (breakfastMissing ? 'breakfast_pool_empty' : 'main_pool_empty');
+      this._cache.arrange_issue = this._normalizeArrangeIssue({
+        error,
+        message_zh: this._poolSelectionMessage(poolData),
+        message_en: this._poolSelectionMessage(poolData),
+      });
+      await this._renderMealPlanFromCache(panel, poolData);
+      I18n.apply();
       return;
     }
 
@@ -1331,11 +2201,25 @@ MealEnginePage._renderMealPlanFromCache = async function(panel, poolData) {
       });
       this._cache.arrange_issue = null;
       this._cache.arranged_plan = plan;
-      await this._renderMealPlanFromCache(panel, poolData);
+      if (btn) btn.textContent = t('plan.procurement_generating');
+      let procurement = null;
+      try {
+        procurement = await API.mealEngineProcurement(plan.start_date || null);
+      } catch (procErr) {
+        await this._renderMealPlanFromCache(panel, poolData);
+        I18n.apply();
+        alert(`${t('common.error')}: ${procErr.message}`);
+        return;
+      }
+      this._cache.procurement = procurement;
+      this._selectTab('procurement');
+      panel.innerHTML = `<div class="card"><div class="loading-state"><span class="spinner"></span> ${t('common.loading')}</div></div>`;
+      await this._renderProcurement(panel, procurement);
       I18n.apply();
+      App.showToast(t('plan.procurement_ready'), 'success');
     } catch (err) {
       const detail = err.detail || {};
-      if (detail.error === 'weekly_micronutrients_missing') {
+      if (this._isArrangeActionError(detail.error)) {
         this._cache.arrange_issue = this._normalizeArrangeIssue(detail);
         await this._renderMealPlanFromCache(panel, poolData);
         I18n.apply();
@@ -1358,19 +2242,19 @@ MealEnginePage._renderMealPlanFromCache = async function(panel, poolData) {
       const originalText = btn.textContent;
       btn.textContent = t('common.loading');
       try {
-        const result = await this._addRecommendedFoodsToPreferences([slug], { panel, refreshPool: false });
-        const addedSet = new Set(this._cache.arrange_issue.added_slugs || []);
-        result.added.forEach(item => addedSet.add(item));
-        this._cache.arrange_issue.added_slugs = Array.from(addedSet);
-        this._cache.arrange_issue.action_message = result.skipped.length
-          ? t('plan.issue_added_partial').replace('{n}', result.added.length).replace('{m}', result.skipped.length)
-          : t('plan.issue_added_notice');
-        await this._renderMealPlanFromCache(panel, poolData);
+        const food = (this._cache.arrange_issue.recommended_foods || []).find(item => item.slug === slug) || { slug };
+        await this._addFoodsAndSupplementPool(panel, poolData, this._cache.arrange_issue, [food]);
+        await this._renderMealPlanFromCache(panel, this._cache.meal_plan_pool || poolData);
         I18n.apply();
       } catch (error) {
-        btn.disabled = false;
-        btn.textContent = originalText;
-        alert(`${t('common.error')}: ${error.message}`);
+        if (this._cache.arrange_issue) {
+          this._cache.arrange_issue.action_message = `${t('common.error')}: ${this._userFacingMessage(error.detail || error.message)}`;
+          await this._renderMealPlanFromCache(panel, this._cache.meal_plan_pool || poolData);
+          I18n.apply();
+        } else {
+          btn.disabled = false;
+          btn.textContent = originalText;
+        }
       }
     });
   });
@@ -1385,14 +2269,18 @@ MealEnginePage._renderMealPlanFromCache = async function(panel, poolData) {
     btn.disabled = true;
     btn.textContent = t('common.loading');
     try {
-      const result = await this._addRecommendedFoodsToPreferences(foods, { panel, refreshPool: true });
-      if (!result.added.length && result.skipped.length) {
-        this._cache.arrange_issue.action_message = t('plan.issue_no_supported_foods');
-      }
+      await this._addFoodsAndSupplementPool(panel, poolData, issue, foods);
+      await this._renderMealPlanFromCache(panel, this._cache.meal_plan_pool || poolData);
+      I18n.apply();
     } catch (error) {
-      btn.disabled = false;
-      btn.textContent = originalText;
-      alert(`${t('common.error')}: ${error.message}`);
+      if (this._cache.arrange_issue) {
+        this._cache.arrange_issue.action_message = `${t('common.error')}: ${this._userFacingMessage(error.detail || error.message)}`;
+        await this._renderMealPlanFromCache(panel, this._cache.meal_plan_pool || poolData);
+        I18n.apply();
+      } else {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
     }
   });
 };

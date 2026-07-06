@@ -3,13 +3,13 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 import models
 from auth import get_current_user
 from database import get_db
-from services import calorie, engagement
+from services import calorie, engagement, local_dates, weight_tracking
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 log = logging.getLogger("compass.app")
@@ -18,25 +18,29 @@ log = logging.getLogger("compass.app")
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class BMRRequest(BaseModel):
-    age: int
-    gender: str            # "male" / "female"
-    height_cm: float
-    weight_kg: float
-    goal: str              # see services.calorie.GOALS
+    age: int = Field(..., ge=13, le=120)
+    gender: str = Field(..., min_length=1, max_length=20)            # "male" / "female"
+    height_cm: float = Field(..., ge=80, le=250)
+    weight_kg: float = Field(..., ge=30, le=300)
+    goal: str = Field(..., min_length=1, max_length=40)              # see services.calorie.GOALS
 
 
 class TargetWeightRequest(BaseModel):
-    target_weight_kg: Optional[float] = None
+    target_weight_kg: Optional[float] = Field(default=None, ge=20, le=300)
 
 
 class WeightUpdateRequest(BaseModel):
-    weight_kg: float
+    weight_kg: float = Field(..., ge=30, le=300)
+
+
+class ActivityLevelRequest(BaseModel):
+    activity_level: str = Field(..., min_length=1, max_length=50)
 
 
 class SettingsRequest(BaseModel):
-    daily_water_goal_ml: Optional[int] = None
-    water_reminder_min: Optional[int] = None
-    language: Optional[str] = None
+    daily_water_goal_ml: Optional[int] = Field(default=None, ge=250, le=10000)
+    water_reminder_min: Optional[int] = Field(default=None, ge=0, le=1440)
+    language: Optional[str] = Field(default=None, min_length=2, max_length=10)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -48,7 +52,7 @@ def get_me(
 ):
     streak = engagement.calc_checkin_streak(db, current_user.id)
     mem_level = current_user.membership.level if current_user.membership else "free"
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = local_dates.today_key()
     checked_in_today = (
         db.query(models.CheckIn)
         .filter(models.CheckIn.user_id == current_user.id, models.CheckIn.date == today)
@@ -87,6 +91,7 @@ def get_bmr(
         "bmr_value": round(targets["bmr"], 1) if targets.get("bmr") else p.bmr_value,
         "tdee_value": round(targets["tdee"], 1) if targets.get("tdee") else None,
         "activity_level": targets.get("activity_level"),
+        "profile_activity_level": p.activity_level or calorie.DEFAULT_ACTIVITY,
         "activity_is_default": targets.get("activity_is_default"),
         "daily_targets": targets,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
@@ -133,6 +138,7 @@ def save_bmr(
         )
         db.add(profile)
 
+    weight_tracking.upsert_condition_weight(db, current_user.id, body.weight_kg)
     db.commit()
     db.refresh(current_user)
 
@@ -188,6 +194,7 @@ def update_weight(
         1,
     )
     profile.updated_at = datetime.now(timezone.utc)
+    weight_tracking.upsert_condition_weight(db, current_user.id, body.weight_kg)
     db.commit()
     db.refresh(current_user)
 
@@ -205,6 +212,41 @@ def update_weight(
         "bmr_value": profile.bmr_value,
         "tdee_value": targets.get("tdee"),
         "calorie_target": targets.get("calorie_target"),
+    }
+
+
+@router.patch("/me/activity-level")
+def update_activity_level(
+    body: ActivityLevelRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if body.activity_level not in calorie.ACTIVITY_MULTIPLIERS:
+        raise HTTPException(status_code=422, detail="Invalid activity_level")
+    profile = current_user.bmr_profile
+    if not profile:
+        raise HTTPException(status_code=404, detail="BMR profile not found")
+
+    profile.activity_level = body.activity_level
+    profile.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(current_user)
+
+    targets = calorie.build_daily_targets(db, current_user)
+    log.info(
+        "default activity level updated",
+        extra={
+            "event": "activity_level_updated",
+            "domain": "users",
+            "activity_level": body.activity_level,
+            "has_bmr_profile": True,
+        },
+    )
+    return {
+        "activity_level": profile.activity_level,
+        "tdee_value": targets.get("tdee"),
+        "calorie_target": targets.get("calorie_target"),
+        "daily_targets": targets,
     }
 
 
@@ -235,7 +277,7 @@ def check_in(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = local_dates.today_key()
     existing = (
         db.query(models.CheckIn)
         .filter(models.CheckIn.user_id == current_user.id, models.CheckIn.date == today)
@@ -292,7 +334,7 @@ def get_streak(
     db: Session = Depends(get_db),
 ):
     streak = engagement.calc_checkin_streak(db, current_user.id)
-    today = datetime.now(timezone.utc)
+    today = local_dates.app_now()
     checkins = {
         c.date
         for c in db.query(models.CheckIn).filter(
@@ -339,6 +381,8 @@ def update_settings(
         s.water_reminder_min = body.water_reminder_min
         changed_keys.append("water_reminder_min")
     if body.language is not None:
+        if body.language not in {"zh", "en"}:
+            raise HTTPException(status_code=422, detail="Invalid language")
         s.language = body.language
         current_user.language = body.language
         changed_keys.append("language")

@@ -1,0 +1,69 @@
+<view class="page page-stats stack">
+  <view class="header">
+    <view class="eyebrow">统计</view>
+    <view class="title">7 天趋势</view>
+    <view class="subtitle">饮食、饮水、运动和体重变化。</view>
+  </view>
+
+  <view wx:if="{{error}}" class="card error">{{error}}</view>
+
+  <view class="grid-2">
+    <view class="metric metric-food">
+      <view class="metric-value">{{summary.diet_7d_avg_calories || 0}}</view>
+      <view class="metric-label">饮食均值 kcal</view>
+    </view>
+    <view class="metric metric-water">
+      <view class="metric-value">{{summary.water_7d_avg_ml || 0}}</view>
+      <view class="metric-label">饮水均值 ml</view>
+    </view>
+    <view class="metric metric-activity">
+      <view class="metric-value">{{summary.exercise_7d_avg_calories || 0}}</view>
+      <view class="metric-label">运动均值 kcal</view>
+    </view>
+    <view class="metric metric-diet">
+      <view class="metric-value">{{summary.checkin_streak || 0}}</view>
+      <view class="metric-label">连续打卡</view>
+    </view>
+  </view>
+
+  <view class="card stack">
+    <view class="card-title">每日热量</view>
+    <view class="list">
+      <view class="list-item" wx:for="{{weekly}}" wx:key="date">
+        <view class="row">
+          <view class="muted">{{item.label}}</view>
+          <view class="muted">{{item.diet_calories}} kcal</view>
+        </view>
+        <view class="bar">
+          <view class="bar-fill" style="width: {{item.dietPct}}%;"></view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view class="card stack">
+    <view class="card-title">饮水</view>
+    <view class="list">
+      <view class="list-item" wx:for="{{weekly}}" wx:key="date">
+        <view class="row">
+          <view class="muted">{{item.label}}</view>
+          <view class="muted">{{item.water_ml}} ml</view>
+        </view>
+        <view class="bar">
+          <view class="bar-fill water" style="width: {{item.waterPct}}%;"></view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view class="card stack">
+    <view class="card-title">体重记录</view>
+    <view wx:if="{{!summary.weight_trend.length}}" class="empty">暂无体重记录。</view>
+    <view class="list" wx:else>
+      <view class="list-item row" wx:for="{{summary.weight_trend}}" wx:key="date">
+        <view class="muted">{{item.date}}</view>
+        <view class="meal-name">{{item.weight_kg}} kg</view>
+      </view>
+    </view>
+  </view>
+</view>

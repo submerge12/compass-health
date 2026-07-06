@@ -11,14 +11,14 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 import models
 from auth import get_current_user
 from database import get_db
-from services import deepseek
+from services import deepseek, food_library as FL, llm_quota
 
 router = APIRouter(prefix="/api/preferences", tags=["preferences"])
 app_log = logging.getLogger("compass.app")
@@ -30,51 +30,127 @@ llm_log = logging.getLogger("compass.llm")
 # this list (or propose new lowercase_snake slugs for vegetables/mushrooms).
 CATEGORY_ITEMS: dict[str, list[str]] = {
     "grains":        ["rice", "brown_rice", "oats", "buckwheat", "quinoa",
-                      "steamed_bun", "sweet_potato", "corn", "potato", "pumpkin"],
+                      "steamed_bun", "sweet_potato", "corn", "potato", "pumpkin",
+                      "red_beans", "mung_beans"],
     "vegetables":    ["tomato", "cucumber", "broccoli", "cauliflower", "cabbage",
                       "spinach", "bok_choy", "kale", "amaranth", "mustard_greens",
                       "carrot", "shiitake", "shiitake_sun", "enoki", "wood_ear",
-                      "kelp", "seaweed"],
+                      "kelp", "seaweed", "onion", "green_pepper", "bell_pepper",
+                      "you_cai", "baby_napa_cabbage", "konjac", "celtuce",
+                      "zucchini"],
     "fruits":        ["strawberry", "cherry_tomato", "pomelo",
                       "blueberry", "kiwi", "pineapple"],
     "meat_low_fat":  ["chicken_breast", "chicken_thigh_skinless",
                       "pork_tenderloin", "cod", "sea_bass", "tilapia",
-                      "shrimp", "egg_white"],
+                      "basa_fish", "shrimp", "egg_white"],
     "meat_mid_fat":  ["whole_egg", "egg_yolk",
                       "beef_tenderloin", "lamb",
                       "chicken_liver",
                       "salmon", "hairtail", "mackerel", "sardine",
-                      "oyster", "clam", "mussel", "scallop"],
+                      "oyster", "clam", "mussel", "scallop", "dried_shrimp"],
     "soy":           ["tofu_firm", "tofu_soft", "dried_tofu", "soy_milk",
-                      "natto", "edamame"],
+                      "natto", "edamame", "black_beans"],
     "dairy":         ["milk", "yogurt", "greek_yogurt"],
-    "nuts":          ["nut_mix", "chia_seed", "sesame", "olive_oil", "cooking_oil"],
+    "nuts":          ["nut_mix", "chia_seed", "sesame", "sesame_paste",
+                      "olive_oil", "cooking_oil"],
 }
 CATEGORIES = set(CATEGORY_ITEMS.keys())
+
+PREFERENCE_NUTRIENT_ORDER: tuple[str, ...] = (
+    "calcium",
+    "iron",
+    "zinc",
+    "iodine",
+    "selenium",
+    "vitamin_a",
+    "vitamin_d",
+    "vitamin_e",
+    "vitamin_k",
+    "b12",
+    "folate",
+    "omega3",
+    "fiber",
+)
+
+
+def _category_for_slug() -> dict[str, str]:
+    return {
+        slug: category
+        for category, slugs in CATEGORY_ITEMS.items()
+        for slug in slugs
+    }
+
+
+def _slug_display_order() -> dict[str, int]:
+    order: dict[str, int] = {}
+    idx = 0
+    for slugs in CATEGORY_ITEMS.values():
+        for slug in slugs:
+            order[slug] = idx
+            idx += 1
+    return order
+
+
+def _nutrient_preference_groups() -> dict[str, list[str]]:
+    allowed = set(_category_for_slug())
+    display_order = _slug_display_order()
+    groups: dict[str, list[str]] = {}
+    for role in PREFERENCE_NUTRIENT_ORDER:
+        slugs = [
+            slug
+            for slug in FL.slugs_by_micronutrient(role)
+            if slug in allowed
+        ]
+        if slugs:
+            groups[role] = sorted(slugs, key=lambda slug: display_order.get(slug, 10_000))
+    return groups
+
+
+def _nutrient_preference_labels() -> dict[str, dict[str, str]]:
+    groups = _nutrient_preference_groups()
+    return {
+        role: {
+            "zh": str(FL.MICRONUTRIENT_ROLES.get(role, {}).get("zh") or role),
+            "en": str(FL.MICRONUTRIENT_ROLES.get(role, {}).get("en") or role),
+            "unit": str(FL.MICRONUTRIENT_ROLES.get(role, {}).get("unit") or ""),
+        }
+        for role in groups
+    }
 
 
 # ── Request / response schemas ───────────────────────────────────────────────
 
 class PreferenceItem(BaseModel):
-    category: str
-    item_key: str
+    category: str = Field(..., min_length=1, max_length=50)
+    item_key: str = Field(..., min_length=1, max_length=80)
 
 
 class CustomEntry(BaseModel):
-    category: str           # the category bucket to classify into (usually "vegetables")
-    hint: Optional[str] = None   # optional sub-category hint: "leafy_greens", "mushrooms", ...
-    text: str               # user's free-form text
+    category: str = Field(..., min_length=1, max_length=50)           # the category bucket to classify into (usually "vegetables")
+    hint: Optional[str] = Field(default=None, max_length=80)   # optional sub-category hint: "leafy_greens", "mushrooms", ...
+    text: str = Field(..., min_length=1, max_length=1000)               # user's free-form text
 
 
 class PreferenceUpsert(BaseModel):
-    items: list[PreferenceItem] = []
-    custom: list[CustomEntry] = []
+    items: list[PreferenceItem] = Field(default_factory=list, max_length=200)
+    custom: list[CustomEntry] = Field(default_factory=list, max_length=20)
     replace: bool = False   # when true, wipe existing prefs before inserting
 
 
 # ── Classifier ───────────────────────────────────────────────────────────────
 
-def classify_custom_text(entry: CustomEntry) -> list[str]:
+def _refund_preference_quota(db: Session, user_id: int, call_log_id: Optional[int]) -> None:
+    if call_log_id is None:
+        return
+    llm_quota.refund_call(
+        db,
+        call_log_id,
+        user_id=user_id,
+        kind=llm_quota.PREFERENCE_CLASSIFY,
+    )
+
+
+def classify_custom_text(entry: CustomEntry, db: Session, user_id: int) -> list[str]:
     """Map free-form user text to a list of canonical item slugs."""
     if entry.category not in CATEGORIES:
         raise HTTPException(
@@ -95,6 +171,7 @@ def classify_custom_text(entry: CustomEntry) -> list[str]:
 
     hint_line = f"Hint sub-category: {entry.hint}\n" if entry.hint else ""
     known = ", ".join(CATEGORY_ITEMS[entry.category])
+    library_known = ", ".join(FL.all_slugs())
 
     system_prompt = f"""
 You are a food classifier.
@@ -103,19 +180,44 @@ Given a free-text list of foods (possibly in Chinese), return their canonical
 slugs under the category "{entry.category}". A slug is lowercase ASCII with
 underscores, e.g. "spinach", "bok_choy", "shiitake", "enoki".
 
-Known slugs in this category: {known}
+Known slugs in this category (use these first): {known}
 
-Reuse a known slug when it matches. If the user names a food not in the list,
-propose a new slug in the same style. Discard anything that is not a food or
-does not belong to this category.
+Existing food-library slugs (reuse exact spelling when relevant): {library_known}
+
+Rules:
+- Prefer a known category slug whenever it is a reasonable match.
+- Do not invent synonyms for foods already covered by a known slug.
+- Propose a new slug only for a concrete single edible ingredient that belongs
+  to this category and would be a plausible central food-library entry.
+- New slugs must be singular lowercase_snake_case ingredient names.
+- Do not return dishes, brands, cooking methods, health goals, adjectives,
+  vague groups, arbitrary translations, or foods outside this category.
 
 Return ONLY valid JSON: {{"items": ["slug1", "slug2"]}}.
 """.strip()
 
     user_prompt = f"{hint_line}Free text:\n{entry.text}"
 
-    client = deepseek.get_client()
+    quota_call_id: Optional[int] = None
     try:
+        quota_usage = llm_quota.check_and_consume(db, user_id, llm_quota.PREFERENCE_CLASSIFY)
+    except llm_quota.LLMQuotaExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "quota_exhausted",
+                "kind": llm_quota.PREFERENCE_CLASSIFY,
+                "message_zh": "本周 AI 食材识别次数已用完，请先从列表中选择或稍后再试。",
+                "message_en": "AI preference-classification quota is exhausted for this week.",
+                "next_refresh_at": exc.next_refresh_at.isoformat()
+                if getattr(exc, "next_refresh_at", None) else None,
+            },
+        )
+    else:
+        quota_call_id = quota_usage.get("call_log_id")
+
+    try:
+        client = deepseek.get_client()
         resp = client.chat.completions.create(
             model=deepseek.DEEPSEEK_CHAT_MODEL,
             messages=[
@@ -145,6 +247,7 @@ Return ONLY valid JSON: {{"items": ["slug1", "slug2"]}}.
         )
         return slugs
     except json.JSONDecodeError:
+        _refund_preference_quota(db, user_id, quota_call_id)
         llm_log.warning(
             "preference classification returned invalid json",
             extra={
@@ -154,8 +257,9 @@ Return ONLY valid JSON: {{"items": ["slug1", "slug2"]}}.
                 "hint": entry.hint or "",
             },
         )
-        raise HTTPException(status_code=500, detail="DeepSeek returned invalid JSON")
+        raise HTTPException(status_code=502, detail="Preference classification returned invalid JSON")
     except Exception as e:
+        _refund_preference_quota(db, user_id, quota_call_id)
         llm_log.exception(
             "preference classification failed",
             extra={
@@ -167,8 +271,8 @@ Return ONLY valid JSON: {{"items": ["slug1", "slug2"]}}.
             },
         )
         raise HTTPException(
-            status_code=500,
-            detail=f"Preference classification failed: {e}",
+            status_code=502,
+            detail="Preference classification failed",
         )
 
 
@@ -182,8 +286,7 @@ def _grouped_preferences(db: Session, user_id: int) -> dict[str, list[str]]:
     )
     grouped: dict[str, list[str]] = {c: [] for c in CATEGORIES}
     for r in rows:
-        allowed = CATEGORY_ITEMS.get(r.category)
-        if allowed is None or r.item_key not in allowed:
+        if r.category not in CATEGORIES:
             continue
         grouped.setdefault(r.category, []).append(r.item_key)
     return grouped
@@ -197,6 +300,8 @@ def list_preferences(
     return {
         "categories": _grouped_preferences(db, current_user.id),
         "known": CATEGORY_ITEMS,
+        "nutrient_groups": _nutrient_preference_groups(),
+        "nutrient_labels": _nutrient_preference_labels(),
     }
 
 
@@ -229,7 +334,7 @@ def upsert_preferences(
         to_insert.append((item.category, key))
 
     for entry in body.custom:
-        slugs = classify_custom_text(entry)
+        slugs = classify_custom_text(entry, db, current_user.id)
         classified[entry.text] = slugs
         for s in slugs:
             to_insert.append((entry.category, s))
@@ -277,6 +382,8 @@ def upsert_preferences(
     return {
         "categories": grouped,
         "known": CATEGORY_ITEMS,
+        "nutrient_groups": _nutrient_preference_groups(),
+        "nutrient_labels": _nutrient_preference_labels(),
         "classified": classified,
     }
 

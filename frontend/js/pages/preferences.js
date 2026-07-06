@@ -5,7 +5,10 @@
 
 const PreferencesPage = {
   _known: null,
+  _nutrientGroups: {},
   _selected: {},
+  _slugToCategory: {},
+  _viewMode: 'category',
 
   async render() {
     const container = document.getElementById('preferences-container');
@@ -16,6 +19,9 @@ const PreferencesPage = {
     try {
       const res = await API.getFoodPreferences();
       this._known = res.known || {};
+      this._nutrientGroups = res.nutrient_groups || {};
+      this._slugToCategory = this._buildSlugToCategory();
+      this._viewMode = 'category';
       this._selected = {};
       for (const [cat, items] of Object.entries(res.categories || {})) {
         const allowed = new Set(this._known[cat] || []);
@@ -25,7 +31,7 @@ const PreferencesPage = {
         if (!this._selected[cat]) this._selected[cat] = new Set();
       }
     } catch (err) {
-      container.innerHTML = `<div class="bmr-card"><div class="empty-state">${I18n.t('common.error')}: ${err.message}</div><div style="display:flex;justify-content:flex-end;margin-top:16px"><button class="btn btn-ghost" id="prefs-skip-err">${I18n.t('prefs.skip')}</button></div></div>`;
+      container.innerHTML = `<div class="bmr-card"><div class="empty-state">${this._esc(I18n.t('common.error'))}: ${this._esc(err.message)}</div><div style="display:flex;justify-content:flex-end;margin-top:16px"><button class="btn btn-ghost" id="prefs-skip-err">${this._esc(I18n.t('prefs.skip'))}</button></div></div>`;
       document.getElementById('prefs-skip-err')?.addEventListener('click', () => App.showView('main'));
       return;
     }
@@ -35,19 +41,29 @@ const PreferencesPage = {
 
   _paint(container) {
     const lang = I18n.lang;
-    const catOrder = ['grains','vegetables','fruits','meat_low_fat','meat_mid_fat','soy','dairy','nuts'];
-    const cats = catOrder.filter(c => this._known[c]);
+    const hasNutrientGroups = this._hasNutrientGroups();
+    const mode = this._viewMode === 'nutrient' && hasNutrientGroups ? 'nutrient' : 'category';
+    this._viewMode = mode;
 
-    const catsHtml = cats.map(cat => {
-      const items = this._known[cat] || [];
-      const chipsHtml = items.map(key => {
-        const isOn = this._selected[cat]?.has(key) ? 'selected' : '';
-        const label = PREF_LABELS[key]?.[lang] || key;
-        return `<button type="button" class="pref-chip ${isOn}" data-cat="${cat}" data-key="${key}">${this._esc(label)}</button>`;
+    const groups = mode === 'nutrient' ? this._nutrientGroupsForRender(lang) : this._categoryGroupsForRender(lang);
+    const modeHtml = hasNutrientGroups ? `
+        <div class="pref-mode-switch" role="tablist" aria-label="${this._esc(I18n.t('prefs.view_mode'))}">
+          <button type="button" class="pref-mode-btn ${mode === 'category' ? 'active' : ''}" data-pref-mode="category" role="tab" aria-selected="${mode === 'category'}">${this._esc(I18n.t('prefs.by_category'))}</button>
+          <button type="button" class="pref-mode-btn ${mode === 'nutrient' ? 'active' : ''}" data-pref-mode="nutrient" role="tab" aria-selected="${mode === 'nutrient'}">${this._esc(I18n.t('prefs.by_nutrient'))}</button>
+        </div>` : '';
+
+    const catsHtml = groups.map(group => {
+      const chipsHtml = group.items.map(key => {
+        const cat = this._slugToCategory[key];
+        if (!cat || !this._selected[cat]) return '';
+        const isOn = this._selected[cat].has(key) ? 'selected' : '';
+        const label = this._foodLabel(key, lang);
+        return `<button type="button" class="pref-chip ${isOn}" data-cat="${this._esc(cat)}" data-key="${this._esc(key)}">${this._esc(label)}</button>`;
       }).join('');
+      if (!chipsHtml) return '';
       return `
         <div class="pref-category">
-          <div class="pref-category-title">${this._esc(PREF_CATEGORY_LABELS[cat]?.[lang] || cat)}</div>
+          <div class="pref-category-title">${this._esc(group.label)}</div>
           <div class="pref-chips">${chipsHtml}</div>
         </div>`;
     }).join('');
@@ -57,6 +73,7 @@ const PreferencesPage = {
         <div class="step-label">${I18n.t('prefs.step_label')}</div>
         <h2 class="bmr-title">${I18n.t('prefs.title')}</h2>
         <p class="bmr-subtitle">${I18n.t('prefs.subtitle')}</p>
+        ${modeHtml}
         <div class="pref-list">${catsHtml}</div>
         <div class="form-error" id="prefs-err" style="margin-top:12px"></div>
         <div style="display:flex;gap:10px;justify-content:space-between;margin-top:24px">
@@ -70,8 +87,23 @@ const PreferencesPage = {
         const cat = btn.getAttribute('data-cat');
         const key = btn.getAttribute('data-key');
         const set = this._selected[cat];
-        if (set.has(key)) { set.delete(key); btn.classList.remove('selected'); }
-        else               { set.add(key);    btn.classList.add('selected'); }
+        if (!set) return;
+        let selected = false;
+        if (set.has(key)) { set.delete(key); }
+        else               { set.add(key); selected = true; }
+        container.querySelectorAll(`.pref-chip[data-key="${key}"]`).forEach(chip => {
+          chip.classList.toggle('selected', selected);
+        });
+      });
+    });
+
+    container.querySelectorAll('[data-pref-mode]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const next = btn.getAttribute('data-pref-mode');
+        if (next && next !== this._viewMode) {
+          this._viewMode = next;
+          this._paint(container);
+        }
       });
     });
 
@@ -97,10 +129,85 @@ const PreferencesPage = {
     }
   },
 
+  _buildSlugToCategory() {
+    const result = {};
+    for (const [cat, items] of Object.entries(this._known || {})) {
+      (items || []).forEach(key => {
+        if (!result[key]) result[key] = cat;
+      });
+    }
+    return result;
+  },
+
+  _categoryGroupsForRender(lang) {
+    const ordered = PREF_CATEGORY_ORDER.filter(cat => this._known[cat]);
+    const extras = Object.keys(this._known || {}).filter(cat => !PREF_CATEGORY_ORDER.includes(cat));
+    return ordered.concat(extras).map(cat => ({
+      key: cat,
+      label: PREF_CATEGORY_LABELS[cat]?.[lang] || cat,
+      items: this._known[cat] || [],
+    }));
+  },
+
+  _nutrientGroupsForRender(lang) {
+    const knownRoles = Object.keys(this._nutrientGroups || {});
+    const ordered = PREF_NUTRIENT_ORDER.filter(role => knownRoles.includes(role));
+    const extras = knownRoles.filter(role => !PREF_NUTRIENT_ORDER.includes(role));
+    return ordered.concat(extras).map(role => ({
+      key: role,
+      label: PREF_NUTRIENT_LABELS[role]?.[lang] || role,
+      items: (this._nutrientGroups[role] || []).filter(key => this._slugToCategory[key]),
+    }));
+  },
+
+  _hasNutrientGroups() {
+    return Object.values(this._nutrientGroups || {}).some(items =>
+      Array.isArray(items) && items.some(key => this._slugToCategory[key])
+    );
+  },
+
+  _foodLabel(key, lang) {
+    return PREF_LABELS[key]?.[lang] || key;
+  },
+
   _esc(s) {
     if (s == null) return '';
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
+};
+
+const PREF_CATEGORY_ORDER = ['grains','vegetables','fruits','meat_low_fat','meat_mid_fat','soy','dairy','nuts'];
+
+const PREF_NUTRIENT_ORDER = [
+  'calcium',
+  'iron',
+  'zinc',
+  'iodine',
+  'selenium',
+  'vitamin_a',
+  'vitamin_d',
+  'vitamin_e',
+  'vitamin_k',
+  'b12',
+  'folate',
+  'omega3',
+  'fiber',
+];
+
+const PREF_NUTRIENT_LABELS = {
+  calcium:   { zh: '\u9499', en: 'Calcium' },
+  iron:      { zh: '\u94c1', en: 'Iron' },
+  zinc:      { zh: '\u950c', en: 'Zinc' },
+  iodine:    { zh: '\u7898', en: 'Iodine' },
+  selenium:  { zh: '\u7852', en: 'Selenium' },
+  vitamin_a: { zh: '\u7ef4\u751f\u7d20 A', en: 'Vitamin A' },
+  vitamin_d: { zh: '\u7ef4\u751f\u7d20 D', en: 'Vitamin D' },
+  vitamin_e: { zh: '\u7ef4\u751f\u7d20 E', en: 'Vitamin E' },
+  vitamin_k: { zh: '\u7ef4\u751f\u7d20 K', en: 'Vitamin K' },
+  b12:       { zh: '\u7ef4\u751f\u7d20 B12', en: 'Vitamin B12' },
+  folate:    { zh: '\u53f6\u9178', en: 'Folate' },
+  omega3:    { zh: 'Omega-3', en: 'Omega-3' },
+  fiber:     { zh: '\u81b3\u98df\u7ea4\u7ef4', en: 'Dietary fiber' },
 };
 
 const PREF_CATEGORY_LABELS = {
@@ -126,6 +233,8 @@ const PREF_LABELS = {
   corn:                    { zh: '玉米',       en: 'Corn' },
   potato:                  { zh: '土豆',       en: 'Potato' },
   pumpkin:                 { zh: '南瓜',       en: 'Pumpkin' },
+  red_beans:               { zh: '红豆',       en: 'Adzuki Beans' },
+  mung_beans:              { zh: '绿豆',       en: 'Mung Beans' },
   // vegetables
   tomato:                  { zh: '番茄',       en: 'Tomato' },
   cucumber:                { zh: '黄瓜',       en: 'Cucumber' },
@@ -144,6 +253,14 @@ const PREF_LABELS = {
   wood_ear:                { zh: '木耳',       en: 'Wood Ear' },
   kelp:                    { zh: '海带',       en: 'Kelp' },
   seaweed:                 { zh: '紫菜',       en: 'Seaweed' },
+  onion:                   { zh: '洋葱',       en: 'Onion' },
+  green_pepper:            { zh: '青椒',       en: 'Green Pepper' },
+  bell_pepper:             { zh: '彩椒',       en: 'Bell Pepper' },
+  you_cai:                 { zh: '油菜',       en: 'Yu Choy' },
+  baby_napa_cabbage:       { zh: '娃娃菜',     en: 'Baby Napa Cabbage' },
+  konjac:                  { zh: '魔芋',       en: 'Konjac' },
+  celtuce:                 { zh: '莴笋',       en: 'Celtuce' },
+  zucchini:                { zh: '西葫芦',     en: 'Zucchini' },
   // fruits
   blueberry:               { zh: '蓝莓',       en: 'Blueberry' },
   strawberry:              { zh: '草莓',       en: 'Strawberry' },
@@ -165,6 +282,7 @@ const PREF_LABELS = {
   cod:                     { zh: '鳕鱼',       en: 'Cod' },
   sea_bass:                { zh: '鲈鱼',       en: 'Sea Bass' },
   tilapia:                 { zh: '罗非鱼',     en: 'Tilapia' },
+  basa_fish:               { zh: '巴沙鱼/龙利鱼', en: 'Basa Fish' },
   shrimp:                  { zh: '虾',         en: 'Shrimp' },
   egg_white:               { zh: '蛋清',       en: 'Egg White' },
   // mid-fat meat
@@ -178,12 +296,13 @@ const PREF_LABELS = {
   duck_blood:              { zh: '鸭血',       en: 'Duck Blood' },
   salmon:                  { zh: '三文鱼',     en: 'Salmon' },
   hairtail:                { zh: '带鱼',       en: 'Hairtail' },
-  mackerel:                { zh: '鲭鱼',       en: 'Mackerel' },
+  mackerel:                { zh: '青花鱼/鲐鱼', en: 'Mackerel' },
   sardine:                 { zh: '沙丁鱼',     en: 'Sardine' },
   oyster:                  { zh: '牡蛎',       en: 'Oyster' },
   clam:                    { zh: '蛤蜊',       en: 'Clam' },
   mussel:                  { zh: '青口',       en: 'Mussel' },
   scallop:                 { zh: '扇贝',       en: 'Scallop' },
+  dried_shrimp:            { zh: '虾皮',       en: 'Dried Shrimp' },
   // soy
   tofu_firm:               { zh: '老豆腐',     en: 'Firm Tofu' },
   tofu_soft:               { zh: '嫩豆腐',     en: 'Soft Tofu' },
@@ -192,6 +311,7 @@ const PREF_LABELS = {
   natto:                   { zh: '纳豆',       en: 'Natto' },
   tempeh:                  { zh: '天贝',       en: 'Tempeh' },
   edamame:                 { zh: '毛豆',       en: 'Edamame' },
+  black_beans:             { zh: '黑豆',       en: 'Black Soybeans' },
   // dairy
   milk:                    { zh: '牛奶',       en: 'Milk' },
   yogurt:                  { zh: '酸奶',       en: 'Yogurt' },
@@ -209,6 +329,7 @@ const PREF_LABELS = {
   flaxseed:                { zh: '亚麻籽',     en: 'Flaxseed' },
   chia_seed:               { zh: '奇亚籽',     en: 'Chia Seeds' },
   sesame:                  { zh: '芝麻',       en: 'Sesame' },
+  sesame_paste:            { zh: '芝麻酱',     en: 'Sesame Paste' },
   olive_oil:               { zh: '橄榄油',     en: 'Olive Oil' },
   cooking_oil:             { zh: '其他炒菜油', en: 'Other Cooking Oil' },
 };

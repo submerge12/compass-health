@@ -1,0 +1,89 @@
+<view class="page page-diet stack">
+  <view class="header">
+    <view class="eyebrow">饮食记录</view>
+    <view class="title">{{today.totals.calories || 0}} kcal</view>
+    <view class="subtitle">蛋白 {{today.totals.protein_g || 0}}g · 碳水 {{today.totals.carbs_g || 0}}g · 脂肪 {{today.totals.fat_g || 0}}g</view>
+  </view>
+
+  <view wx:if="{{error}}" class="card error">{{error}}</view>
+
+  <view class="card stack soft-panel">
+    <view class="segmented">
+      <view class="segment {{mode === 'manual' ? 'active' : ''}}" data-mode="manual" bindtap="switchMode">手动</view>
+      <view class="segment {{mode === 'ingredients' ? 'active' : ''}}" data-mode="ingredients" bindtap="switchMode">食材估算</view>
+    </view>
+
+    <view class="field">
+      <view class="label">餐次</view>
+      <picker range="{{mealTypes}}" range-key="label" value="{{mealTypeIndex}}" bindchange="onMealTypeChange">
+        <view class="picker row">
+          <text>{{mealTypes[mealTypeIndex].label}}</text>
+          <text class="muted">选择</text>
+        </view>
+      </picker>
+    </view>
+
+    <block wx:if="{{mode === 'manual'}}">
+      <view class="field">
+        <view class="label">食物名称</view>
+        <input class="input" value="{{manual.food_name}}" placeholder="例如 鸡胸肉饭" data-key="food_name" bindinput="onManualInput" />
+      </view>
+      <view class="grid-2">
+        <view class="field">
+          <view class="label">热量</view>
+          <input class="input" type="number" value="{{manual.calories}}" placeholder="kcal" data-key="calories" bindinput="onManualInput" />
+        </view>
+        <view class="field">
+          <view class="label">蛋白</view>
+          <input class="input" type="digit" value="{{manual.protein_g}}" placeholder="g" data-key="protein_g" bindinput="onManualInput" />
+        </view>
+        <view class="field">
+          <view class="label">碳水</view>
+          <input class="input" type="digit" value="{{manual.carbs_g}}" placeholder="g" data-key="carbs_g" bindinput="onManualInput" />
+        </view>
+        <view class="field">
+          <view class="label">脂肪</view>
+          <input class="input" type="digit" value="{{manual.fat_g}}" placeholder="g" data-key="fat_g" bindinput="onManualInput" />
+        </view>
+      </view>
+    </block>
+
+    <block wx:else>
+      <view class="field">
+        <view class="label">食材清单</view>
+        <view class="muted">每行填写：食材 + 具体克数。保存时会按“食材 克数g”提交。</view>
+      </view>
+
+      <view class="ingredient-list">
+        <view class="ingredient-row {{ingredientRows.length > 1 ? 'can-remove' : ''}}" wx:for="{{ingredientRows}}" wx:key="id" wx:for-index="index">
+          <input class="input ingredient-name" value="{{item.name}}" placeholder="输入食材" data-index="{{index}}" data-key="name" bindinput="onIngredientRowInput" />
+          <view class="gram-field">
+            <input class="input ingredient-grams" type="digit" value="{{item.grams}}" placeholder="克数" data-index="{{index}}" data-key="grams" bindinput="onIngredientRowInput" />
+            <text class="gram-unit">g</text>
+          </view>
+          <button wx:if="{{ingredientRows.length > 1}}" class="button button-small button-danger ingredient-remove" data-index="{{index}}" bindtap="removeIngredientRow">删</button>
+        </view>
+      </view>
+
+      <button class="button button-ghost" bindtap="addIngredientRow">添加食材</button>
+    </block>
+
+    <button class="button button-primary" loading="{{saving}}" disabled="{{saving}}" bindtap="save">保存</button>
+  </view>
+
+  <view class="card stack">
+    <view class="card-title">今天已记录</view>
+    <view wx:if="{{!today.logs.length}}" class="empty">还没有记录。</view>
+    <view class="list" wx:else>
+      <view class="list-item" wx:for="{{today.logs}}" wx:key="id">
+        <view class="row">
+          <view>
+            <view class="meal-name">{{item.food_name}}</view>
+            <view class="meal-meta">{{item.meal_label}} · {{item.calories}} kcal · 蛋白 {{item.protein_g}}g</view>
+          </view>
+          <view class="tag">{{item.macro}}</view>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

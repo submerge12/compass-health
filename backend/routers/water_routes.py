@@ -2,22 +2,24 @@ from datetime import datetime, timezone
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 import models
 from auth import get_current_user
 from database import get_db
+from services import local_dates
+from services.local_dates import date_or_422
 
 router = APIRouter(prefix="/api/water", tags=["water"])
 log = logging.getLogger("compass.app")
 
 
 class WaterLogRequest(BaseModel):
-    amount_ml: int
-    date: Optional[str] = None
+    amount_ml: int = Field(..., gt=0, le=5000)
+    date: Optional[str] = Field(default=None, min_length=10, max_length=10)
 
 
 @router.post("/log")
@@ -28,7 +30,7 @@ def log_water(
 ):
     if body.amount_ml <= 0:
         raise HTTPException(status_code=422, detail="amount_ml must be positive")
-    date = body.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date = date_or_422(body.date)
 
     entry = models.WaterLog(user_id=current_user.id, date=date, amount_ml=body.amount_ml)
     db.add(entry)
@@ -89,7 +91,7 @@ def get_water_today(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = local_dates.today_key()
     logs = (
         db.query(models.WaterLog)
         .filter(models.WaterLog.user_id == current_user.id, models.WaterLog.date == today)
@@ -109,15 +111,12 @@ def get_water_today(
 
 @router.get("/history")
 def get_water_history(
-    days: int = 7,
+    days: int = Query(7, ge=1, le=90),
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    from datetime import timedelta
-    today = datetime.now(timezone.utc)
     result = []
-    for i in range(days - 1, -1, -1):
-        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+    for d in local_dates.date_range_ending_today(days):
         total = (
             db.query(func.sum(models.WaterLog.amount_ml))
             .filter(models.WaterLog.user_id == current_user.id, models.WaterLog.date == d)

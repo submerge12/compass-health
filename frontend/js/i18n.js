@@ -129,6 +129,25 @@ const TRANSLATIONS = {
     "diet.ingredients_placeholder": "鸡胸肉 200g\n西兰花 150g\n大米 80g\n橄榄油 10ml\n鸡蛋 2个",
     "diet.log_ingredients_btn": "记录",
     "diet.pending_analysis": "等待营养分析",
+    "diet.quick_record": "快速记录",
+    "diet.protein_status": "蛋白状态",
+    "diet.meal_progress": "餐次进度",
+    "diet.recent_logs": "今日记录",
+    "diet.record_this": "记录",
+    "diet.not_recorded": "未记录",
+    "diet.no_meal_logs": "还没有记录",
+    "diet.no_logs_today": "今天还没有饮食记录",
+    "diet.entries_logged": "条记录",
+    "diet.ready_to_record": "待记录",
+    "diet.err_select_meal": "请选择餐次",
+    "diet.err_enter_ingredients": "请输入食材清单",
+    "diet.saving": "保存中…",
+    "diet.saved_estimated": "饮食记录已保存",
+    "diet.saved_pending": "已保存，营养分析稍后补齐",
+    "diet.reanalyze": "重新分析",
+    "diet.reanalyzing": "正在重新分析营养数据…",
+    "diet.reanalyze_done": "营养分析已补齐",
+    "diet.reanalyze_pending": "DeepSeek 仍未返回结果，记录已保留",
     "diet.food_name": "食物名称",
     "diet.calories": "热量 (kcal)",
     "diet.protein": "蛋白质 (g)",
@@ -201,6 +220,9 @@ const TRANSLATIONS = {
     "prefs.subtitle": "选择你喜欢的食物，我们会根据你的偏好推荐菜谱。可以跳过。",
     "prefs.save": "保存偏好",
     "prefs.skip": "跳过",
+    "prefs.view_mode": "\u504f\u597d\u5206\u7ec4\u65b9\u5f0f",
+    "prefs.by_category": "\u98df\u6750\u7c7b\u522b",
+    "prefs.by_nutrient": "\u8425\u517b\u7d20",
     // Common
     "common.save": "保存",
     "common.cancel": "取消",
@@ -409,6 +431,7 @@ const TRANSLATIONS = {
     "plan.meal_breakfast": "早餐",
     "plan.meal_lunch": "午餐",
     "plan.meal_dinner": "晚餐",
+"plan.meal_food_item": "食材",
     "plan.total": "合计",
     "plan.day_actual": "当日实际",
     "plan.warnings": "提醒",
@@ -642,6 +665,25 @@ const TRANSLATIONS = {
     "diet.ingredients_placeholder": "chicken breast 200g\nbroccoli 150g\nrice 80g\nolive oil 10ml\negg 2",
     "diet.log_ingredients_btn": "Log",
     "diet.pending_analysis": "Pending nutrition analysis",
+    "diet.quick_record": "Quick Log",
+    "diet.protein_status": "Protein Status",
+    "diet.meal_progress": "Meal Progress",
+    "diet.recent_logs": "Today Logs",
+    "diet.record_this": "Log",
+    "diet.not_recorded": "Not logged",
+    "diet.no_meal_logs": "No logs yet",
+    "diet.no_logs_today": "No food logged today",
+    "diet.entries_logged": "logged",
+    "diet.ready_to_record": "Ready",
+    "diet.err_select_meal": "Select a meal",
+    "diet.err_enter_ingredients": "Enter ingredients",
+    "diet.saving": "Saving…",
+    "diet.saved_estimated": "Food logged",
+    "diet.saved_pending": "Saved; nutrition analysis will be filled in later",
+    "diet.reanalyze": "Reanalyze",
+    "diet.reanalyzing": "Reanalyzing nutrition…",
+    "diet.reanalyze_done": "Nutrition analysis updated",
+    "diet.reanalyze_pending": "DeepSeek still returned no result; the log is kept",
     "diet.food_name": "Food Name",
     "diet.calories": "Calories (kcal)",
     "diet.protein": "Protein (g)",
@@ -711,6 +753,9 @@ const TRANSLATIONS = {
     "prefs.subtitle": "Pick your favourites — we'll use them to suggest recipes. You can skip this.",
     "prefs.save": "Save Preferences",
     "prefs.skip": "Skip",
+    "prefs.view_mode": "Preference grouping",
+    "prefs.by_category": "Food groups",
+    "prefs.by_nutrient": "Nutrients",
     "common.save": "Save",
     "common.cancel": "Cancel",
     "common.delete": "Delete",
@@ -916,6 +961,7 @@ const TRANSLATIONS = {
     "plan.meal_breakfast": "Breakfast",
     "plan.meal_lunch": "Lunch",
     "plan.meal_dinner": "Dinner",
+"plan.meal_food_item": "Food item",
     "plan.total": "Total",
     "plan.day_actual": "Day actual",
     "plan.warnings": "Warnings",
@@ -1156,6 +1202,7 @@ Object.assign(TRANSLATIONS.zh, {
   "home.nav_menu": "菜单生成",
   "home.nav_procurement": "采购规划",
   "home.nav_library": "食谱库",
+  "home.nav_community": "社区",
   "home.nav_profile": "个人中心",
   "home.start_now": "立即开始",
   "home.user_label": "当前用户",
@@ -1236,6 +1283,7 @@ Object.assign(TRANSLATIONS.en, {
   "home.nav_menu": "Meal Builder",
   "home.nav_procurement": "Procurement",
   "home.nav_library": "Recipe Library",
+  "home.nav_community": "Community",
   "home.nav_profile": "Profile",
   "home.start_now": "Start Now",
   "home.user_label": "Current user",
@@ -1329,6 +1377,7 @@ Object.assign(TRANSLATIONS.zh, {
   "home.nav_menu": "菜单生成",
   "home.nav_procurement": "采购规划",
   "home.nav_library": "食谱库",
+  "home.nav_community": "社区",
   "home.nav_profile": "个人中心",
   "home.start_now": "立即开始",
   "home.user_label": "当前用户",
@@ -1404,6 +1453,172 @@ Object.assign(TRANSLATIONS.zh, {
 
 Object.assign(TRANSLATIONS.en, {
   "home.hero.eyebrow": "Real logging · Fixed meals · Procurement loop"
+});
+
+Object.assign(TRANSLATIONS.zh, {
+  "plan.closed_loop_title": "食物库还不能生成菜单",
+  "plan.closed_loop_missing_list": "需要补齐的基础类别",
+  "plan.closed_loop_bucket_help": "至少加入一个这个类别的食材，系统才能继续生成候选池。",
+  "plan.closed_loop_unknown_gap": "暂时无法识别具体缺口，请先补充基础食材偏好。",
+  "plan.closed_loop_add_all_and_refresh": "加入推荐食材并重新生成"
+});
+
+Object.assign(TRANSLATIONS.en, {
+  "plan.closed_loop_title": "The food library is not ready for menu generation",
+  "plan.closed_loop_missing_list": "Foundational categories to fill",
+  "plan.closed_loop_bucket_help": "Add at least one food in this category so the planner can generate a candidate pool.",
+  "plan.closed_loop_unknown_gap": "The exact gap could not be identified. Add more foundational food preferences first.",
+  "plan.closed_loop_add_all_and_refresh": "Add recommendations and regenerate"
+});
+
+Object.assign(TRANSLATIONS.zh, {
+  "admin.nav_ops": "运营控制"
+});
+
+Object.assign(TRANSLATIONS.en, {
+  "admin.nav_ops": "Operations"
+});
+
+Object.assign(TRANSLATIONS.zh, {
+  "settings.account_center": "个人中心",
+  "settings.email_missing": "未绑定邮箱",
+  "settings.member_status": "当前会员",
+  "settings.current_weight_short": "当前体重",
+  "settings.target_weight_short": "目标体重",
+  "settings.target_weight_hint_short": "用于评估进度",
+  "settings.tdee_short": "每日消耗",
+  "settings.activity_short": "活动等级",
+  "settings.activity_effect": "影响热量估算",
+  "settings.health_profile": "健康档案",
+  "settings.body_goals": "身体数据与目标",
+  "settings.start_bmr": "完善档案",
+  "settings.target_weight": "目标体重 (kg)",
+  "settings.target_weight_placeholder": "选填",
+  "settings.goal_status": "当前目标",
+  "settings.update_target_weight": "更新目标",
+  "settings.no_bmr_title": "还没有健康档案",
+  "settings.no_bmr_hint": "先完善基础信息后，就可以设置体重、目标和默认活动等级。",
+  "settings.activity_default": "默认活动等级",
+  "settings.choose_activity": "选择活动等级",
+  "settings.activity_default_hint": "默认等级用于没有单独记录每日活动时的热量与营养目标估算。",
+  "settings.today_activity": "今日使用",
+  "settings.activity_source_unknown": "暂未获取到活动记录",
+  "settings.activity_source_today": "来自今日记录",
+  "settings.activity_source_default": "来自默认等级",
+  "settings.daily_settings": "日常设置",
+  "settings.hydration_language": "饮水与语言",
+  "settings.meal_profile": "配餐偏好",
+  "settings.activity_modal_title": "选择默认活动等级",
+  "settings.activity_modal_hint": "如果当天记录了更具体的活动等级，系统会优先使用当天记录。",
+  "settings.activity_save": "保存活动等级",
+  "settings.activity_saved": "活动等级已更新",
+  "settings.weight_invalid": "请输入 30-300kg 之间的有效体重",
+  "settings.target_weight_invalid": "目标体重需在 20-300kg 之间，或留空",
+  "settings.target_weight_saved": "目标体重已更新",
+  "settings.water_goal_invalid": "饮水目标须在 500-10000ml 之间",
+  "settings.activity_sedentary_desc": "大部分时间坐着，日常步行较少。",
+  "settings.activity_lightly_desc": "日常有通勤、散步或轻量活动。",
+  "settings.activity_moderately_desc": "每周有几次运动或日常活动量稳定。",
+  "settings.activity_strength_desc": "规律力量训练或高强度运动。"
+});
+
+Object.assign(TRANSLATIONS.en, {
+  "settings.account_center": "Profile Center",
+  "settings.email_missing": "No email connected",
+  "settings.member_status": "Current membership",
+  "settings.current_weight_short": "Current Weight",
+  "settings.target_weight_short": "Target Weight",
+  "settings.target_weight_hint_short": "Progress reference",
+  "settings.tdee_short": "Daily Burn",
+  "settings.activity_short": "Activity Level",
+  "settings.activity_effect": "Shapes calorie estimates",
+  "settings.health_profile": "Health Profile",
+  "settings.body_goals": "Body Data & Goals",
+  "settings.start_bmr": "Complete Profile",
+  "settings.target_weight": "Target Weight (kg)",
+  "settings.target_weight_placeholder": "Optional",
+  "settings.goal_status": "Current goal",
+  "settings.update_target_weight": "Update Target",
+  "settings.no_bmr_title": "No health profile yet",
+  "settings.no_bmr_hint": "Complete your basics first, then you can set weight, goals, and default activity.",
+  "settings.activity_default": "Default Activity",
+  "settings.choose_activity": "Choose Activity",
+  "settings.activity_default_hint": "This default is used for calorie and nutrition targets when no daily activity record exists.",
+  "settings.today_activity": "Used today",
+  "settings.activity_source_unknown": "Activity record unavailable",
+  "settings.activity_source_today": "From today's record",
+  "settings.activity_source_default": "From default level",
+  "settings.daily_settings": "Daily Settings",
+  "settings.hydration_language": "Hydration & Language",
+  "settings.meal_profile": "Meal Profile",
+  "settings.activity_modal_title": "Choose Default Activity",
+  "settings.activity_modal_hint": "If a more specific activity level is logged for the day, the daily record takes priority.",
+  "settings.activity_save": "Save Activity",
+  "settings.activity_saved": "Activity level updated",
+  "settings.weight_invalid": "Enter a valid weight between 30 and 300 kg",
+  "settings.target_weight_invalid": "Target weight must be between 20 and 300 kg, or left blank",
+  "settings.target_weight_saved": "Target weight updated",
+  "settings.water_goal_invalid": "Water goal must be between 500 and 10000 ml",
+  "settings.activity_sedentary_desc": "Mostly seated, with limited walking or movement.",
+  "settings.activity_lightly_desc": "Light commuting, walking, or gentle daily movement.",
+  "settings.activity_moderately_desc": "Several workouts per week or steady daily movement.",
+  "settings.activity_strength_desc": "Regular strength training or high-intensity exercise."
+});
+
+Object.assign(TRANSLATIONS.zh, {
+  "plan.procurement_generating": "正在生成采购清单...",
+  "plan.procurement_ready": "采购清单已生成"
+});
+
+Object.assign(TRANSLATIONS.en, {
+  "plan.procurement_generating": "Generating shopping list...",
+  "plan.procurement_ready": "Shopping list ready"
+});
+
+Object.assign(TRANSLATIONS.zh, {
+  "plan.pool_refresh_confirm": "这会重新拉取一组候选菜；当前勾选的菜会保留在新候选池顶部，周安排会重置，是否继续？",
+  "plan.pool_carryover_badge": "上次保留",
+  "plan.pool_carryover_summary": "已带入上次保留 {n} 道"
+});
+
+Object.assign(TRANSLATIONS.en, {
+  "plan.pool_refresh_confirm": "This will fetch a new candidate pool; dishes currently checked will stay at the top of the new pool, and the arranged week will reset. Continue?",
+  "plan.pool_carryover_badge": "Kept from previous",
+  "plan.pool_carryover_summary": "{n} kept from previous"
+});
+
+Object.assign(TRANSLATIONS.zh, {
+  "plan.pool_source_all": "全部",
+  "plan.pool_source_generated": "生成",
+  "plan.pool_source_library": "食谱库",
+  "plan.pool_source_supplement": "补充",
+  "plan.issue_reinforcement_title": "候选池还覆盖不了强化日",
+  "plan.issue_breakfast_empty_title": "早餐候选池不足",
+  "plan.issue_main_empty_title": "主菜候选池不足",
+  "plan.issue_arrangement_failed_title": "当前候选池还排不出完整周计划",
+  "plan.issue_pool_gap_hint": "保留更多相关候选，或加入推荐食材后补充候选池。",
+  "plan.issue_add_pref_and_supplement_btn": "加入并补池",
+  "plan.issue_add_all_and_supplement": "全部加入并补充候选池",
+  "plan.issue_supplement_added": "已补充早餐 {b} 道、主菜 {m} 道；当前筛选显示补充候选，原有勾选已保留。",
+  "plan.issue_supplement_empty": "偏好已保存，但这次没有拿到新的补充候选。可以保留更多现有候选后再试。",
+  "plan.issue_no_recommendations": "当前错误没有可自动加入的推荐食材。"
+});
+
+Object.assign(TRANSLATIONS.en, {
+  "plan.pool_source_all": "All",
+  "plan.pool_source_generated": "Generated",
+  "plan.pool_source_library": "Recipe library",
+  "plan.pool_source_supplement": "Supplement",
+  "plan.issue_reinforcement_title": "The pool cannot cover a reinforcement day yet",
+  "plan.issue_breakfast_empty_title": "Breakfast pool is too small",
+  "plan.issue_main_empty_title": "Main-dish pool is too small",
+  "plan.issue_arrangement_failed_title": "This pool cannot form a full weekly plan yet",
+  "plan.issue_pool_gap_hint": "Keep more matching candidates, or add the recommended foods and supplement the pool.",
+  "plan.issue_add_pref_and_supplement_btn": "Add and supplement",
+  "plan.issue_add_all_and_supplement": "Add all and supplement pool",
+  "plan.issue_supplement_added": "Added {b} breakfast and {m} main supplemental candidates. Existing selections were kept.",
+  "plan.issue_supplement_empty": "Preferences were saved, but no new supplemental candidates came back this time. Keep more existing candidates and try again.",
+  "plan.issue_no_recommendations": "This issue does not include foods that can be added automatically."
 });
 
 const I18n = {

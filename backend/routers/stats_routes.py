@@ -7,7 +7,7 @@ from sqlalchemy import func
 import models
 from auth import get_current_user
 from database import get_db
-from services import engagement
+from services import engagement, local_dates
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
@@ -17,13 +17,11 @@ def get_stats_summary(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    today = datetime.now(timezone.utc)
     uid = current_user.id
 
     # 7-day water average
     water_totals = []
-    for i in range(7):
-        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+    for d in reversed(local_dates.date_range_ending_today(7)):
         total = (
             db.query(func.sum(models.WaterLog.amount_ml))
             .filter(models.WaterLog.user_id == uid, models.WaterLog.date == d)
@@ -35,8 +33,7 @@ def get_stats_summary(
 
     # 7-day exercise average calories
     ex_totals = []
-    for i in range(7):
-        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+    for d in reversed(local_dates.date_range_ending_today(7)):
         total = (
             db.query(func.sum(models.ExerciseLog.calories_burned))
             .filter(models.ExerciseLog.user_id == uid, models.ExerciseLog.date == d)
@@ -48,8 +45,7 @@ def get_stats_summary(
 
     # 7-day diet average calories
     diet_totals = []
-    for i in range(7):
-        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+    for d in reversed(local_dates.date_range_ending_today(7)):
         total = (
             db.query(func.sum(models.DietLog.calories))
             .filter(models.DietLog.user_id == uid, models.DietLog.date == d)
@@ -91,11 +87,9 @@ def get_weekly_stats(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    today = datetime.now(timezone.utc)
     uid = current_user.id
     result = []
-    for i in range(6, -1, -1):
-        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+    for d in local_dates.date_range_ending_today(7):
 
         water = (
             db.query(func.sum(models.WaterLog.amount_ml))

@@ -225,10 +225,15 @@ const App = {
 
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
-    toast.innerHTML = `
-      <span class="toast-icon">${icons[type] || icons.info}</span>
-      <span>${msg}</span>
-    `;
+
+    const icon = document.createElement('span');
+    icon.className = 'toast-icon';
+    icon.textContent = icons[type] || icons.info;
+
+    const text = document.createElement('span');
+    text.textContent = msg == null ? '' : String(msg);
+
+    toast.append(icon, text);
 
     container.appendChild(toast);
 

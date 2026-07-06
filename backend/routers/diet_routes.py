@@ -1,51 +1,54 @@
 from datetime import datetime, timedelta, timezone
 import json
 import logging
-import os
-from typing import Optional
-from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from typing import Literal, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-import httpx
-from openai import OpenAI
 
 import models
 from auth import get_current_user
 from database import get_db
-from services import calorie, planning_context as pc
+from services import calorie, deepseek, llm_quota, local_dates, planning_context as pc
+from services.local_dates import date_or_422
 
 router = APIRouter(prefix="/api/diet", tags=["diet"])
 app_log = logging.getLogger("compass.app")
 llm_log = logging.getLogger("compass.llm")
-
-load_dotenv()
-
-
-def get_deepseek_client() -> OpenAI:
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY is not configured")
-    return OpenAI(api_key=api_key, base_url="https://api.deepseek.com", http_client=httpx.Client(trust_env=False))
-
+DietMealType = Literal["breakfast", "lunch", "dinner", "snack"]
 
 class DietLogRequest(BaseModel):
-    meal_type: str          # breakfast / lunch / dinner / snack
-    food_name: str
-    calories: int
-    protein_g: Optional[float] = 0.0
-    carbs_g: Optional[float] = 0.0
-    fat_g: Optional[float] = 0.0
-    date: Optional[str] = None
+    meal_type: DietMealType
+    food_name: str = Field(..., min_length=1, max_length=120)
+    calories: int = Field(..., ge=0, le=5000)
+    protein_g: Optional[float] = Field(default=0.0, ge=0, le=500)
+    carbs_g: Optional[float] = Field(default=0.0, ge=0, le=1000)
+    fat_g: Optional[float] = Field(default=0.0, ge=0, le=500)
+    date: Optional[str] = Field(default=None, min_length=10, max_length=10)
 
 
 class DietIngredientRequest(BaseModel):
-    meal_type: str          # breakfast / lunch / dinner / snack
-    ingredients: str        # raw ingredient list, one per line
-    date: Optional[str] = None
+    meal_type: DietMealType
+    ingredients: str = Field(..., min_length=1, max_length=4000)        # raw ingredient list, one per line
+    date: Optional[str] = Field(default=None, min_length=10, max_length=10)
 
 
-def estimate_nutrition_with_deepseek(ingredients: str) -> dict:
+def _refund_diet_estimate_quota(
+    db: Optional[Session],
+    user_id: Optional[int],
+    call_log_id: Optional[int],
+) -> None:
+    if call_log_id is None or db is None or user_id is None:
+        return
+    if llm_quota.refund_call(db, call_log_id, user_id=user_id, kind=llm_quota.DIET_ESTIMATE):
+        db.commit()
+
+
+def estimate_nutrition_with_deepseek(
+    ingredients: str,
+    db: Optional[Session] = None,
+    user_id: Optional[int] = None,
+) -> dict:
     """
     Use DeepSeek to estimate nutrition values from raw ingredient text.
     Returns:
@@ -68,7 +71,25 @@ def estimate_nutrition_with_deepseek(ingredients: str) -> dict:
         },
     )
 
-    client = get_deepseek_client()
+    quota_call_id: Optional[int] = None
+    if db is not None and user_id is not None:
+        try:
+            quota_usage = llm_quota.check_and_consume(db, user_id, llm_quota.DIET_ESTIMATE)
+        except llm_quota.LLMQuotaExceeded as exc:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "quota_exhausted",
+                    "kind": llm_quota.DIET_ESTIMATE,
+                    "message_zh": "本周 AI 营养估算次数已用完，先保存为待分析记录。",
+                    "message_en": "AI nutrition-estimate quota is exhausted for this week; the log was saved as pending.",
+                    "next_refresh_at": exc.next_refresh_at.isoformat()
+                    if getattr(exc, "next_refresh_at", None) else None,
+                },
+            )
+        else:
+            quota_call_id = quota_usage.get("call_log_id")
+            db.commit()
 
     system_prompt = """
 You are a nutrition analysis assistant.
@@ -99,29 +120,55 @@ Estimate the nutrition for the following meal ingredients:
 {ingredients}
 """.strip()
 
+    def _json_from_content(content: str) -> dict:
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            start = content.find("{")
+            end = content.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                raise
+            return json.loads(content[start:end + 1])
+
+    def _bump_estimate(value: object) -> float:
+        return max(0.0, float(value or 0) * 1.1)
+
     try:
+        client = deepseek.get_client()
         resp = client.chat.completions.create(
-            model="deepseek-reasoner",
+            model=deepseek.DEEPSEEK_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            response_format={"type": "json_object"},
-            max_tokens=300,
+            max_tokens=1200,
         )
 
-        content = resp.choices[0].message.content
+        choice = resp.choices[0]
+        message = choice.message
+        content = message.content
         if not content:
+            reasoning_content = getattr(message, "reasoning_content", "") or ""
+            llm_log.warning(
+                "diet ingredient estimation returned empty content",
+                extra={
+                    "event": "diet_estimation_empty_content",
+                    "domain": "diet",
+                    "ingredient_line_count": ingredient_lines,
+                    "finish_reason": getattr(choice, "finish_reason", None),
+                    "reasoning_content_chars": len(reasoning_content),
+                },
+            )
             raise ValueError("Empty response from DeepSeek")
 
-        data = json.loads(content)
+        data = _json_from_content(content)
 
         result = {
             "food_name": str(data.get("food_name", "食材餐")),
-            "calories": int(data.get("calories", 0)),
-            "protein_g": float(data.get("protein_g", 0.0)),
-            "carbs_g": float(data.get("carbs_g", 0.0)),
-            "fat_g": float(data.get("fat_g", 0.0)),
+            "calories": int(round(_bump_estimate(data.get("calories", 0)))),
+            "protein_g": round(_bump_estimate(data.get("protein_g", 0.0)), 1),
+            "carbs_g": round(_bump_estimate(data.get("carbs_g", 0.0)), 1),
+            "fat_g": round(_bump_estimate(data.get("fat_g", 0.0)), 1),
         }
         llm_log.info(
             "diet ingredient estimation succeeded",
@@ -135,6 +182,7 @@ Estimate the nutrition for the following meal ingredients:
         )
         return result
     except json.JSONDecodeError:
+        _refund_diet_estimate_quota(db, user_id, quota_call_id)
         llm_log.warning(
             "diet ingredient estimation returned invalid json",
             extra={
@@ -144,10 +192,11 @@ Estimate the nutrition for the following meal ingredients:
             },
         )
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="DeepSeek returned invalid JSON"
         )
     except HTTPException:
+        _refund_diet_estimate_quota(db, user_id, quota_call_id)
         llm_log.warning(
             "diet ingredient estimation rejected",
             extra={
@@ -158,6 +207,7 @@ Estimate the nutrition for the following meal ingredients:
         )
         raise
     except Exception as e:
+        _refund_diet_estimate_quota(db, user_id, quota_call_id)
         llm_log.exception(
             "diet ingredient estimation failed",
             extra={
@@ -168,9 +218,38 @@ Estimate the nutrition for the following meal ingredients:
             },
         )
         raise HTTPException(
-            status_code=500,
-            detail=f"DeepSeek nutrition estimation failed: {str(e)}"
+            status_code=502,
+            detail="DeepSeek nutrition estimation failed"
         )
+
+
+def pending_nutrition_result(ingredients: str, meal_type: str) -> dict:
+    meal_labels = {
+        "breakfast": "早餐",
+        "lunch": "午餐",
+        "dinner": "晚餐",
+        "snack": "加餐",
+    }
+    lines = [line.strip() for line in ingredients.splitlines() if line.strip()]
+    preview = " + ".join(lines[:2])
+    if len(lines) > 2:
+        preview += " ..."
+    food_name = preview or meal_labels.get(meal_type, meal_type) or "食材餐"
+    return {
+        "food_name": food_name[:80],
+        "calories": 0,
+        "protein_g": 0.0,
+        "carbs_g": 0.0,
+        "fat_g": 0.0,
+    }
+
+
+def apply_nutrition_result(entry: models.DietLog, result: dict) -> None:
+    entry.food_name = result["food_name"] or entry.food_name
+    entry.calories = result["calories"]
+    entry.protein_g = result["protein_g"]
+    entry.carbs_g = result["carbs_g"]
+    entry.fat_g = result["fat_g"]
 
 
 @router.post("/log")
@@ -179,7 +258,9 @@ def log_diet(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    date = body.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if body.meal_type not in {"breakfast", "lunch", "dinner", "snack"}:
+        raise HTTPException(status_code=422, detail="Invalid meal_type")
+    date = date_or_422(body.date)
     entry = models.DietLog(
         user_id=current_user.id,
         date=date,
@@ -225,8 +306,10 @@ def log_diet_ingredients(
     """
     if not body.ingredients or not body.ingredients.strip():
         raise HTTPException(status_code=400, detail="ingredients cannot be empty")
+    if body.meal_type not in {"breakfast", "lunch", "dinner", "snack"}:
+        raise HTTPException(status_code=422, detail="Invalid meal_type")
 
-    date_str = body.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = date_or_422(body.date)
     meal_labels = {
         "breakfast": "早餐",
         "lunch": "午餐",
@@ -234,7 +317,23 @@ def log_diet_ingredients(
         "snack": "加餐",
     }
 
-    result = estimate_nutrition_with_deepseek(body.ingredients)
+    nutrition_status = "estimated"
+    estimation_error = None
+    try:
+        result = estimate_nutrition_with_deepseek(body.ingredients, db, current_user.id)
+    except HTTPException as exc:
+        nutrition_status = "pending"
+        estimation_error = str(exc.detail)
+        llm_log.warning(
+            "diet ingredient estimation deferred",
+            extra={
+                "event": "diet_estimation_deferred",
+                "domain": "diet",
+                "ingredient_line_count": len([line for line in body.ingredients.splitlines() if line.strip()]),
+                "status_code": exc.status_code,
+            },
+        )
+        result = pending_nutrition_result(body.ingredients, body.meal_type)
 
     food_name = result["food_name"] or meal_labels.get(body.meal_type, body.meal_type)
 
@@ -258,7 +357,7 @@ def log_diet_ingredients(
         extra={
             "event": "diet_logged",
             "domain": "diet",
-            "source": "ingredients_llm",
+            "source": "ingredients_llm" if nutrition_status == "estimated" else "ingredients_pending",
             "log_id": entry.id,
             "date": date_str,
             "meal_type": body.meal_type,
@@ -274,6 +373,75 @@ def log_diet_ingredients(
     return {
         "id": entry.id,
         "message": "Diet ingredients logged",
+        "nutrition_status": nutrition_status,
+        "estimation_error": estimation_error,
+        "nutrition": {
+            "food_name": entry.food_name,
+            "calories": entry.calories,
+            "protein_g": entry.protein_g,
+            "carbs_g": entry.carbs_g,
+            "fat_g": entry.fat_g,
+        },
+    }
+
+
+@router.post("/log/{log_id}/reanalyze")
+def reanalyze_diet_log(
+    log_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    entry = db.query(models.DietLog).filter(
+        models.DietLog.id == log_id,
+        models.DietLog.user_id == current_user.id
+    ).first()
+
+    if not entry:
+        raise HTTPException(status_code=404, detail="Log not found")
+    if not entry.ingredients or not entry.ingredients.strip():
+        raise HTTPException(status_code=400, detail="Only ingredient-based logs can be reanalyzed")
+
+    nutrition_status = "estimated"
+    estimation_error = None
+    try:
+        result = estimate_nutrition_with_deepseek(entry.ingredients, db, current_user.id)
+    except HTTPException as exc:
+        nutrition_status = "pending"
+        estimation_error = str(exc.detail)
+        llm_log.warning(
+            "diet ingredient reanalysis deferred",
+            extra={
+                "event": "diet_reanalysis_deferred",
+                "domain": "diet",
+                "log_id": entry.id,
+                "ingredient_line_count": len([line for line in entry.ingredients.splitlines() if line.strip()]),
+                "status_code": exc.status_code,
+            },
+        )
+    else:
+        apply_nutrition_result(entry, result)
+        db.commit()
+        db.refresh(entry)
+        app_log.info(
+            "diet ingredients reanalyzed",
+            extra={
+                "event": "diet_reanalyzed",
+                "domain": "diet",
+                "log_id": entry.id,
+                "date": entry.date,
+                "meal_type": entry.meal_type,
+                "food_name": entry.food_name[:80],
+                "calories": entry.calories,
+                "protein_g": entry.protein_g,
+                "carbs_g": entry.carbs_g,
+                "fat_g": entry.fat_g,
+            },
+        )
+
+    return {
+        "id": entry.id,
+        "nutrition_status": nutrition_status,
+        "estimation_error": estimation_error,
         "nutrition": {
             "food_name": entry.food_name,
             "calories": entry.calories,
@@ -323,7 +491,7 @@ def get_diet_today(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = local_dates.today_key()
     logs = (
         db.query(models.DietLog)
         .filter(
@@ -389,15 +557,13 @@ def get_diet_today(
 
 @router.get("/history")
 def get_diet_history(
-    days: int = 7,
+    days: int = Query(7, ge=1, le=90),
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    today = datetime.now(timezone.utc)
     result = []
 
-    for i in range(days - 1, -1, -1):
-        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+    for d in local_dates.date_range_ending_today(days):
         logs = (
             db.query(models.DietLog)
             .filter(

@@ -7,10 +7,10 @@ priority chain (recorded > fixed > recipe > generated) per (date, meal_type).
 Each surviving slot is then expanded into per-slug grams via
 `Recipe.ingredients_json` scaled by `portion_g / serving_g`.
 
-Slots that can't be expanded (recorded meals, generated plans, or custom-named
-meals with no recipe link) contribute nothing to the shopping list and are
-surfaced in `warnings` instead. This keeps the list honest: we never guess
-amounts for slots the user hasn't authored with a structured recipe.
+Slots that can't be expanded (recorded meals or custom-named meals with no
+recipe link) contribute nothing to the shopping list and are surfaced in
+`warnings` instead. Generated arrangements are expanded when they already
+persisted a structured Recipe row.
 
 Each output row carries:
   * slug + display names
@@ -29,6 +29,7 @@ from typing import Iterable, Optional
 from sqlalchemy.orm import Session
 
 from services import food_library as FL
+from services import nutrition_audit
 from services import planning_context as pc
 
 
@@ -126,6 +127,7 @@ def aggregate_for_week(
 
     contexts = pc.project_week(db, user, start_date, length_days)
     key_set = set(non_substitutable_slugs)
+    library_slugs = nutrition_audit.load_user_library(db, user.id)
 
     gram_totals: dict[str, float] = defaultdict(float)
     meal_counts: dict[str, int] = defaultdict(int)
@@ -164,18 +166,16 @@ def aggregate_for_week(
 
         for slot in ctx.planned_meals:
             label = f"{date}/{slot.meal_type} ({slot.status})"
-            if slot.status != pc.SLOT_STATUS_RECIPE:
-                # Generated slots don't persist the solver's per-slug parts,
-                # so we can't populate the shopping list from them. The user
-                # will see a warning and can commit a recipe to proceed.
+            src = db.query(MealPlanEntry).filter_by(id=slot.source_id).first()
+            if slot.status not in (pc.SLOT_STATUS_RECIPE, pc.SLOT_STATUS_GENERATED):
                 warnings.append(
-                    f"{label}: generated slot — pick a recipe to include it "
-                    f"in the shopping list."
+                    f"{label}: unsupported planned slot status — skipped."
                 )
                 continue
-            src = db.query(MealPlanEntry).filter_by(id=slot.source_id).first()
             if src is None or src.recipe_id is None:
-                warnings.append(f"{label}: plan entry is missing its recipe link.")
+                warnings.append(
+                    f"{label}: plan entry is missing its recipe link — cannot add to shopping list."
+                )
                 continue
             recipe = _recipe(src.recipe_id)
             if recipe is None:
@@ -202,7 +202,7 @@ def aggregate_for_week(
             "recommended_g":       recommended,
             "meal_count":          meal_counts[slug],
             "is_key_food":         slug in key_set,
-            "replaceable":         _has_substitute_in_library(slug, entry, gram_totals),
+            "replaceable":         _has_substitute_in_library(slug, entry, library_slugs),
             "primary_macro":       entry["primary_macro"],
             "micronutrient_roles": list(entry["micronutrient_roles"]),
             "notes":               entry.get("notes"),
@@ -233,15 +233,15 @@ def aggregate_for_week(
 
 
 def _has_substitute_in_library(
-    slug: str, entry: dict, gram_totals: dict[str, float]
+    slug: str, entry: dict, library_slugs: Iterable[str]
 ) -> bool:
     """True when another slug sharing the primary execution bucket is also
-    in the plan. Used to render the "replaceable" badge next to each row."""
+    in the user's library. Used to render the "replaceable" badge next to each row."""
     buckets = entry["execution_buckets"]
     if not buckets:
         return False
     main_bucket = buckets[0]
-    for other_slug in gram_totals:
+    for other_slug in library_slugs:
         if other_slug == slug:
             continue
         other = FL.FOOD_LIBRARY.get(other_slug)

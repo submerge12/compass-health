@@ -28,7 +28,7 @@ const StatsPage = {
       this._renderContent(summary, weekly, user, t);
     } catch (err) {
       document.getElementById('stats-content').innerHTML =
-        `<div style="color:var(--rust);text-align:center;padding:40px">${err.message}</div>`;
+        `<div style="color:var(--rust);text-align:center;padding:40px">${this._esc(err.message)}</div>`;
     }
   },
 
@@ -173,7 +173,7 @@ const StatsPage = {
     const container = document.getElementById('stats-water-chart');
     if (!container || !weekly) return;
     const max = Math.max(...weekly.map(d => d.water_ml), 1);
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = this._todayDateString();
     container.innerHTML = weekly.map(d => {
       const h = Math.round((d.water_ml / max) * 80);
       return `
@@ -188,7 +188,7 @@ const StatsPage = {
     const container = document.getElementById('stats-exercise-chart');
     if (!container || !weekly) return;
     const max = Math.max(...weekly.map(d => d.exercise_calories), 1);
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = this._todayDateString();
     container.innerHTML = weekly.map(d => {
       const h = Math.round((d.exercise_calories / max) * 80);
       return `
@@ -203,7 +203,7 @@ const StatsPage = {
     const container = document.getElementById('stats-diet-chart');
     if (!container || !weekly) return;
     const max = Math.max(...weekly.map(d => d.diet_calories), 1);
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = this._todayDateString();
     container.innerHTML = weekly.map(d => {
       const h = Math.round((d.diet_calories / max) * 80);
       return `
@@ -212,6 +212,14 @@ const StatsPage = {
           <div class="bar-label">${d.date.slice(5)}</div>
         </div>`;
     }).join('');
+  },
+
+  _todayDateString() {
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
   },
 
   _calcWeightGoal() {
@@ -289,5 +297,13 @@ const StatsPage = {
           </div>
         </div>
       </div>`;
+  },
+
+  _esc(s) {
+    if (s == null) return '';
+    return String(s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
   }
 };

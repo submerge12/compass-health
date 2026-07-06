@@ -20,8 +20,8 @@ Endpoints:
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 import models
@@ -34,6 +34,7 @@ from services import (
     procurement,
     feedback_loop,
 )
+from services.local_dates import date_or_422
 
 
 router = APIRouter(prefix="/api/meal-engine", tags=["meal-engine"])
@@ -168,7 +169,7 @@ def get_targets(
 # ── Procurement aggregation ──────────────────────────────────────────────────
 
 class _ProcurementRequest(BaseModel):
-    start_date: Optional[str] = None    # "YYYY-MM-DD"; defaults to today (UTC)
+    start_date: Optional[str] = Field(default=None, min_length=10, max_length=10)
 
 
 @router.post("/procurement")
@@ -180,14 +181,12 @@ def post_procurement(
     """Shopping list aggregated from the user's persisted plan.
 
     Reads `UserFixedMeal` + `MealPlanEntry` + `DietLog` for the 7-day window
-    starting at `start_date` (today UTC if omitted). The priority chain
+    starting at `start_date` (today in the app timezone if omitted). The priority chain
     (recorded > fixed > recipe > generated) is applied per slot inside
     `procurement.aggregate_for_week`; recorded (DietLog) slots contribute
     nothing, recipe-backed slots expand via `Recipe.ingredients_json`, and
     generated slots surface in `warnings` so the user can commit a recipe.
     """
-    from datetime import datetime, timezone
-
     audit = nutrition_audit.run_audit(db, current_user)
     feasibility = audit.get("validation", {}).get("overall")
     if feasibility == "not_closed_loop":
@@ -205,8 +204,7 @@ def post_procurement(
             "message_en": "Library is not closed-loop feasible — no shopping list.",
         }
 
-    start_date = (body.start_date if body else None) or \
-        datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    start_date = date_or_422(body.start_date if body else None)
     key_slugs = {row["slug"] for row in audit.get("non_substitutable", [])}
     result = procurement.aggregate_for_week(db, current_user, start_date, key_slugs)
     log.info(
@@ -233,11 +231,11 @@ def post_procurement(
 
 @router.get("/daily")
 def get_daily(
-    date: Optional[str] = None,
+    date: Optional[str] = Query(default=None, min_length=10, max_length=10),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    report = feedback_loop.daily_report(db, current_user, date)
+    report = feedback_loop.daily_report(db, current_user, date_or_422(date))
     log.info(
         "meal-engine daily feedback viewed",
         extra={
@@ -254,11 +252,11 @@ def get_daily(
 
 @router.get("/weekly")
 def get_weekly(
-    end_date: Optional[str] = None,
+    end_date: Optional[str] = Query(default=None, min_length=10, max_length=10),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    review = feedback_loop.weekly_review(db, current_user, end_date)
+    review = feedback_loop.weekly_review(db, current_user, date_or_422(end_date))
     logged_days = len([
         day for day in review.get("dailies", [])
         if day.get("actual", {}).get("entries", 0) > 0

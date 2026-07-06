@@ -1,0 +1,76 @@
+<view class="page page-meal-plan stack">
+  <view class="header">
+    <view class="eyebrow">AI 配餐</view>
+    <view class="title">一周餐单</view>
+    <view class="subtitle">先生成候选菜池，确认选择后自动排进未来 7 天。</view>
+  </view>
+
+  <view wx:if="{{error}}" class="card error">{{error}}</view>
+
+  <view class="card stack soft-panel">
+    <view class="row">
+      <view>
+        <view class="card-title">候选菜池</view>
+        <view class="muted">{{poolSummary}}</view>
+      </view>
+      <button class="button button-small button-secondary" loading="{{generating}}" disabled="{{generating}}" bindtap="generatePool">生成</button>
+    </view>
+    <button wx:if="{{hasPool}}" class="button button-secondary" loading="{{arranging}}" disabled="{{arranging}}" bindtap="arrangePlan">安排一周餐单</button>
+  </view>
+
+  <view wx:if="{{hasPool}}" class="card stack">
+    <view>
+      <view class="card-title">早餐候选</view>
+      <view class="muted">点按可选择或取消。</view>
+    </view>
+    <view class="list">
+      <view class="list-item dish {{item.selected ? 'selected' : ''}}" wx:for="{{pool.breakfast}}" wx:key="dish_id" data-group="breakfast" data-index="{{index}}" bindtap="toggleDish">
+        <view class="row">
+          <view>
+            <view class="meal-name">{{item.name}}</view>
+            <view class="meal-meta">{{item.calories}} kcal · {{item.ingredientText}}</view>
+          </view>
+          <view class="tag">{{item.selected ? '已选' : '未选'}}</view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{hasPool}}" class="card stack">
+    <view>
+      <view class="card-title">午晚餐候选</view>
+      <view class="muted">默认全部进入排餐，取消重复或不想吃的菜。</view>
+    </view>
+    <view class="list">
+      <view class="list-item dish {{item.selected ? 'selected' : ''}}" wx:for="{{pool.main}}" wx:key="dish_id" data-group="main" data-index="{{index}}" bindtap="toggleDish">
+        <view class="row">
+          <view>
+            <view class="meal-name">{{item.name}}</view>
+            <view class="meal-meta">{{item.calories}} kcal · {{item.ingredientText}}</view>
+          </view>
+          <view class="tag">{{item.selected ? '已选' : '未选'}}</view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view class="card stack">
+    <view class="row">
+      <view>
+        <view class="card-title">已安排餐单</view>
+        <view class="muted">确认今天的餐单会写入饮食记录。</view>
+      </view>
+      <button class="button button-small button-ghost" loading="{{confirming}}" disabled="{{confirming}}" bindtap="confirmToday">确认今日</button>
+    </view>
+
+    <view wx:if="{{!week.days.length}}" class="empty">还没有餐单。</view>
+    <view class="list" wx:else>
+      <view class="list-item" wx:for="{{week.days}}" wx:key="date">
+        <view class="card-title">{{item.date}}</view>
+        <view class="meal-meta" wx:for="{{item.mealItems}}" wx:for-item="meal" wx:key="type">
+          {{meal.label}}：{{meal.name}}
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

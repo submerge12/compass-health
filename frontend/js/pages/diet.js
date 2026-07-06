@@ -7,8 +7,11 @@ const DietPage = {
 
   /** Cached recipe list loaded from the API */
   _recipes: null,
+  _communityRecipes: null,
   _activeTab: 'record',
   _pendingTab: null,
+  _selectedMeal: null,
+  _todayData: null,
 
   async render() {
     const el = document.getElementById('page-diet');
@@ -18,8 +21,12 @@ const DietPage = {
     this._pendingTab = null;
 
     el.innerHTML = `
-      <div class="page-header">
-        <div><h2>${t('diet.title')}</h2></div>
+      <div class="diet-page-head">
+        <div>
+          <div class="diet-kicker">${t('diet.today_label')}</div>
+          <h2>${t('diet.title')}</h2>
+        </div>
+        <button class="btn btn-primary btn-sm" id="diet-focus-record-btn" type="button">${t('diet.quick_record')}</button>
       </div>
 
       <!-- Tab bar -->
@@ -31,60 +38,91 @@ const DietPage = {
 
       <!-- ── Tab: Diet Record ───────────────────────────────── -->
       <div class="page-tab-panel ${activeTab === 'record' ? 'active' : ''}" id="diet-panel-record">
-        <div class="grid-2" style="gap:24px">
-          <div>
-            <div class="card">
-              <div class="card-title">${t('diet.add')}</div>
-              <div class="form-group">
-                <label>${t('diet.meal_type')}</label>
-                <select id="diet-meal" class="form-control">
-                  <option value="">--</option>
-                  <option value="breakfast">${t('diet.breakfast')}</option>
-                  <option value="lunch">${t('diet.lunch')}</option>
-                  <option value="dinner">${t('diet.dinner')}</option>
-                  <option value="snack">${t('diet.snack')}</option>
-                </select>
-                <div class="form-error" id="err-diet-meal"></div>
+        <div class="diet-today-layout">
+          <section class="diet-today-main">
+            <div class="diet-overview">
+              <div class="diet-overview-primary">
+                <span class="diet-overview-label">${t('diet.total_cal')}</span>
+                <div class="diet-overview-value">
+                  <strong id="diet-total-cal">0</strong>
+                  <span>/ <span id="diet-cal-target">--</span> kcal</span>
+                </div>
+                <div class="diet-overview-rail">
+                  <div class="diet-overview-fill" id="diet-cal-progress"></div>
+                </div>
               </div>
-              <div class="form-group">
-                <label>${t('diet.ingredients')}</label>
-                <div class="form-hint">${t('diet.ingredients_hint')}</div>
-                <textarea id="diet-ingredients" class="form-textarea" rows="8"
-                  placeholder="${t('diet.ingredients_placeholder')}"></textarea>
-                <div class="form-error" id="err-diet-ingredients"></div>
+              <div class="diet-stat-strip">
+                <div class="diet-stat">
+                  <span>${t('diet.remaining')}</span>
+                  <strong><span id="diet-remaining">--</span> kcal</strong>
+                </div>
+                <div class="diet-stat">
+                  <span>${t('diet.protein_status')}</span>
+                  <strong id="diet-protein-status">--</strong>
+                </div>
+                <div class="diet-stat">
+                  <span>${t('diet.meal_progress')}</span>
+                  <strong id="diet-meal-progress">0/4</strong>
+                </div>
               </div>
-              <button class="btn btn-primary btn-full" id="diet-log-btn">${t('diet.log_ingredients_btn')}</button>
+              <div class="diet-macro-grid">
+                ${['protein','carbs','fat'].map(key => `
+                  <div class="diet-macro-card ${key}">
+                    <div class="diet-macro-head">
+                      <span>${t('diet.' + key)}</span>
+                      <strong><span id="macro-${key[0]}-val">0</span>g</strong>
+                    </div>
+                    <div class="diet-macro-rail">
+                      <div class="diet-macro-fill ${key}" id="diet-${key}-progress"></div>
+                    </div>
+                    <div class="diet-macro-target">/ <span id="diet-${key}-target">--</span>g</div>
+                  </div>`).join('')}
+              </div>
             </div>
-          </div>
 
-          <div>
-            <div class="card" style="margin-bottom:16px">
-              <div class="card-title">${t('diet.total_cal')}</div>
-              <div style="display:flex;align-items:baseline;gap:8px">
-                <div class="card-value" id="diet-total-cal">0</div>
-                <div style="font-size:0.84rem;color:var(--text-3)">/ <span id="diet-tdee">--</span> kcal</div>
-              </div>
-              <div style="font-size:0.82rem;color:var(--text-2);margin-top:4px">
-                ${t('diet.remaining')}: <span id="diet-remaining" style="font-weight:600">--</span> kcal
-              </div>
-              <div class="macro-bar" style="margin-top:12px">
-                <div class="macro-seg macro-protein" id="macro-protein" style="flex:0"></div>
-                <div class="macro-seg macro-carbs"   id="macro-carbs"   style="flex:0"></div>
-                <div class="macro-seg macro-fat"     id="macro-fat"     style="flex:0"></div>
-              </div>
-              <div class="macro-legend">
-                <span class="p">${t('diet.protein')}: <span id="macro-p-val">0</span>g</span>
-                <span class="c">${t('diet.carbs')}: <span id="macro-c-val">0</span>g</span>
-                <span class="f">${t('diet.fat')}: <span id="macro-f-val">0</span>g</span>
-              </div>
+            <div class="diet-meal-grid" id="diet-meal-grid">
+              <div style="color:var(--text-3);font-size:0.84rem;text-align:center;padding:20px">${t('common.loading')}</div>
             </div>
-            <div class="card">
-              <div class="card-title">${t('diet.title')}</div>
+
+            <div class="diet-log-panel">
+              <div class="diet-section-head">
+                <div>
+                  <div class="card-title">${t('diet.recent_logs')}</div>
+                </div>
+              </div>
               <div id="diet-log-list">
                 <div style="color:var(--text-3);font-size:0.84rem;text-align:center;padding:20px">${t('common.loading')}</div>
               </div>
             </div>
-          </div>
+          </section>
+
+          <aside class="diet-entry-panel" id="diet-entry-panel">
+            <div class="diet-entry-title">
+              <div>
+                <div class="card-title">${t('diet.add')}</div>
+                <strong id="diet-entry-meal-label">${t('diet.meal_type')}</strong>
+              </div>
+              <span class="diet-entry-status" id="diet-entry-status">--</span>
+            </div>
+            <div class="form-group">
+              <label>${t('diet.meal_type')}</label>
+              <div class="diet-meal-picker" id="diet-meal-picker">
+                ${['breakfast','lunch','dinner','snack'].map(meal => `
+                  <button type="button" class="diet-meal-chip" data-meal-option="${meal}">${t('diet.' + meal)}</button>
+                `).join('')}
+              </div>
+              <input type="hidden" id="diet-meal" value="">
+              <div class="form-error" id="err-diet-meal"></div>
+            </div>
+            <div class="form-group">
+              <label>${t('diet.ingredients')}</label>
+              <div class="form-hint">${t('diet.ingredients_hint')}</div>
+              <textarea id="diet-ingredients" class="form-textarea diet-ingredient-input" rows="10"
+                placeholder="${t('diet.ingredients_placeholder')}"></textarea>
+              <div class="form-error" id="err-diet-ingredients"></div>
+            </div>
+            <button class="btn btn-primary btn-full" id="diet-log-btn" type="button">${t('diet.log_ingredients_btn')}</button>
+          </aside>
         </div>
       </div>
 
@@ -131,11 +169,20 @@ const DietPage = {
     });
 
     document.getElementById('diet-log-btn').onclick = () => this._submitRecord();
+    document.getElementById('diet-focus-record-btn').onclick = () => {
+      this._switchTab('record');
+      this._focusRecord();
+    };
+    el.querySelectorAll('[data-meal-option]').forEach(btn => {
+      btn.onclick = () => this._selectMeal(btn.dataset.mealOption, { focus: true });
+    });
     document.getElementById('ingredient-search-btn').onclick = () => this._searchByIngredients();
     document.getElementById('add-recipe-btn').onclick = () => this._showAddRecipeModal();
 
     // Invalidate recipe cache on re-render so fresh data is loaded
     this._recipes = null;
+    this._communityRecipes = null;
+    this._selectMeal(this._selectedMeal || this._suggestMeal(), { focus: false });
 
     await this._loadTodayData();
     if (activeTab === 'recipes') await this._loadRecipeLibrary();
@@ -158,7 +205,9 @@ const DietPage = {
   async _loadTodayData() {
     try {
       const data = await API.getDietToday();
+      this._todayData = data;
       this._updateSummary(data);
+      this._renderMealCards(data.logs || []);
       this._renderLogs(data.logs);
     } catch (err) {
       App.showToast(err.message, 'error');
@@ -166,58 +215,158 @@ const DietPage = {
   },
 
   _updateSummary(data) {
-    const { totals, tdee, remaining_calories } = data;
+    const { totals = {}, remaining_calories } = data;
+    const target = data.calorie_target || data.tdee || 0;
+    const macroTargets = data.macro_targets || {};
     const setEl = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+    const setWidth = (id, val) => { const e = document.getElementById(id); if (e) e.style.width = `${val}%`; };
     setEl('diet-total-cal', totals.calories || 0);
-    setEl('diet-tdee',      tdee || '--');
-    setEl('diet-remaining', remaining_calories || '--');
-    setEl('macro-p-val',    totals.protein_g || 0);
-    setEl('macro-c-val',    totals.carbs_g   || 0);
-    setEl('macro-f-val',    totals.fat_g     || 0);
-    const total = (totals.protein_g || 0) + (totals.carbs_g || 0) + (totals.fat_g || 0);
-    if (total > 0) {
-      const pct = (n, t) => ((n / t) * 100).toFixed(1);
-      const setFlex = (id, v) => { const e = document.getElementById(id); if (e) e.style.flex = v; };
-      setFlex('macro-protein', pct(totals.protein_g, total));
-      setFlex('macro-carbs',   pct(totals.carbs_g,   total));
-      setFlex('macro-fat',     pct(totals.fat_g,     total));
-    }
+    setEl('diet-cal-target', target || '--');
+    setEl('diet-remaining', Number.isFinite(Number(remaining_calories)) ? remaining_calories : '--');
+    setEl('macro-p-val', this._formatMacro(totals.protein_g));
+    setEl('macro-c-val', this._formatMacro(totals.carbs_g));
+    setEl('macro-f-val', this._formatMacro(totals.fat_g));
+    setEl('diet-protein-target', macroTargets.protein_g ? this._formatMacro(macroTargets.protein_g) : '--');
+    setEl('diet-carbs-target', macroTargets.carbs_g ? this._formatMacro(macroTargets.carbs_g) : '--');
+    setEl('diet-fat-target', macroTargets.fat_g ? this._formatMacro(macroTargets.fat_g) : '--');
+    setWidth('diet-cal-progress', this._progressPct(totals.calories, target));
+    setWidth('diet-protein-progress', this._progressPct(totals.protein_g, macroTargets.protein_g));
+    setWidth('diet-carbs-progress', this._progressPct(totals.carbs_g, macroTargets.carbs_g));
+    setWidth('diet-fat-progress', this._progressPct(totals.fat_g, macroTargets.fat_g));
+
+    const loggedMeals = new Set((data.logs || []).map(l => l.meal_type));
+    setEl('diet-meal-progress', `${loggedMeals.size}/4`);
+    const proteinStatus = data.protein_classification
+      ? I18n.t(`diet.protein_band_${data.protein_classification}`)
+      : '--';
+    setEl('diet-protein-status', proteinStatus);
   },
 
   _renderLogs(logs) {
     const container = document.getElementById('diet-log-list');
     if (!container) return;
     if (!logs || !logs.length) {
-      container.innerHTML = `<div style="color:var(--text-3);font-size:0.84rem;text-align:center;padding:20px">${I18n.t('common.no_data')}</div>`;
+      container.innerHTML = `<div class="diet-empty-state">${I18n.t('diet.no_logs_today')}</div>`;
       return;
     }
     const t = k => I18n.t(k);
-    const meals = { breakfast: [], lunch: [], dinner: [], snack: [] };
-    logs.forEach(l => { if (meals[l.meal_type]) meals[l.meal_type].push(l); });
+    const sorted = [...logs].sort((a, b) => new Date(b.logged_at) - new Date(a.logged_at));
+    container.innerHTML = `<div class="diet-log-list">
+      ${sorted.map(l => this._logRow(l, t)).join('')}
+    </div>`;
+  },
 
-    container.innerHTML = ['breakfast','lunch','dinner','snack'].map(m => {
-      const items = meals[m];
-      if (!items.length) return '';
+  _renderMealCards(logs) {
+    const container = document.getElementById('diet-meal-grid');
+    if (!container) return;
+    const t = k => I18n.t(k);
+    const mealOrder = ['breakfast','lunch','dinner','snack'];
+    container.innerHTML = mealOrder.map(meal => {
+      const items = logs.filter(l => l.meal_type === meal);
+      const calories = items.reduce((sum, item) => sum + (item.calories || 0), 0);
+      const pending = items.some(item => item.ingredients && item.calories === 0);
       return `
-        <div class="section-label">${t('diet.' + m)}</div>
-        ${items.map(l => {
-          const pending = l.ingredients && l.calories === 0;
-          const preview = l.ingredients ? l.ingredients.split('\n').slice(0, 2).join(' · ') : '';
-          return `
-            <div class="log-item" style="margin-bottom:6px">
-              <div class="log-info">
-                <div><strong>${this._esc(l.food_name)}</strong></div>
-                ${pending
-                  ? `<span class="pending-badge">${t('diet.pending_analysis')}</span>
-                     <span class="log-time">${this._esc(preview)}</span>`
-                  : `<span class="log-value">${l.calories} kcal</span>
-                     <span class="log-time">${l.protein_g}g P · ${l.carbs_g}g C · ${l.fat_g}g F</span>`
-                }
-              </div>
-              <button class="log-delete" onclick="DietPage._deleteLog(${l.id})">✕</button>
-            </div>`;
-        }).join('')}`;
+        <article class="diet-meal-card ${items.length ? 'has-logs' : 'is-empty'} ${pending ? 'has-pending' : ''}">
+          <div class="diet-meal-card-head">
+            <div>
+              <span>${t('diet.' + meal)}</span>
+              <strong>${items.length ? `${calories} kcal` : t('diet.not_recorded')}</strong>
+            </div>
+            <button class="btn btn-ghost btn-sm" type="button" data-meal-record="${meal}">${t('diet.record_this')}</button>
+          </div>
+          <div class="diet-meal-card-body">
+            ${items.length
+              ? items.map(item => this._mealCardItem(item)).join('')
+              : `<div class="diet-empty-line">${t('diet.no_meal_logs')}</div>`}
+          </div>
+        </article>`;
     }).join('');
+    container.querySelectorAll('[data-meal-record]').forEach(btn => {
+      btn.onclick = () => this._selectMeal(btn.dataset.mealRecord, { focus: true });
+    });
+    this._selectMeal(this._selectedMeal || this._suggestMeal(), { focus: false });
+  },
+
+  _mealCardItem(item) {
+    const pending = item.ingredients && item.calories === 0;
+    const preview = item.ingredients ? item.ingredients.split('\n').slice(0, 2).join(' · ') : '';
+    return `
+      <div class="diet-meal-line">
+        <span>${this._esc(item.food_name)}</span>
+        ${pending
+          ? `<em>${I18n.t('diet.pending_analysis')}</em>`
+          : `<em>${item.calories} kcal</em>`}
+        ${preview ? `<small>${this._esc(preview)}</small>` : ''}
+      </div>`;
+  },
+
+  _logRow(log, t) {
+    const pending = log.ingredients && log.calories === 0;
+    const preview = log.ingredients ? log.ingredients.split('\n').slice(0, 2).join(' · ') : '';
+    return `
+      <div class="log-item diet-log-item">
+        <span class="diet-meal-pill">${t('diet.' + log.meal_type)}</span>
+        <div class="log-info">
+          <div><strong>${this._esc(log.food_name)}</strong></div>
+          ${pending
+            ? `<span class="pending-badge">${t('diet.pending_analysis')}</span>
+               <span class="log-time">${this._esc(preview)}</span>`
+            : `<span class="log-value">${log.calories} kcal</span>
+               <span class="log-time">${this._formatMacro(log.protein_g)}g P · ${this._formatMacro(log.carbs_g)}g C · ${this._formatMacro(log.fat_g)}g F</span>`}
+        </div>
+        <div class="diet-log-actions">
+          ${pending ? `<button class="btn btn-ghost btn-sm" type="button" onclick="DietPage._reanalyzeLog(${log.id})">${t('diet.reanalyze')}</button>` : ''}
+          <button class="log-delete" type="button" onclick="DietPage._deleteLog(${log.id})">✕</button>
+        </div>
+      </div>`;
+  },
+
+  _selectMeal(meal, { focus = false } = {}) {
+    if (!meal) return;
+    this._selectedMeal = meal;
+    const input = document.getElementById('diet-meal');
+    if (input) input.value = meal;
+    document.querySelectorAll('[data-meal-option]').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.mealOption === meal);
+    });
+    document.querySelectorAll('[data-meal-record]').forEach(btn => {
+      btn.closest('.diet-meal-card')?.classList.toggle('is-selected', btn.dataset.mealRecord === meal);
+    });
+    const mealLabel = document.getElementById('diet-entry-meal-label');
+    if (mealLabel) mealLabel.textContent = I18n.t('diet.' + meal);
+    const status = document.getElementById('diet-entry-status');
+    if (status) {
+      const count = (this._todayData?.logs || []).filter(log => log.meal_type === meal).length;
+      status.textContent = count ? `${count} ${I18n.t('diet.entries_logged')}` : I18n.t('diet.ready_to_record');
+    }
+    if (focus) this._focusRecord();
+  },
+
+  _focusRecord() {
+    const panel = document.getElementById('diet-entry-panel');
+    panel?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    document.getElementById('diet-ingredients')?.focus();
+  },
+
+  _suggestMeal() {
+    const hour = new Date().getHours();
+    if (hour < 10) return 'breakfast';
+    if (hour < 14) return 'lunch';
+    if (hour < 20) return 'dinner';
+    return 'snack';
+  },
+
+  _formatMacro(value) {
+    const number = Number(value || 0);
+    const rounded = Math.round(number * 10) / 10;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  },
+
+  _progressPct(value, target) {
+    const current = Number(value || 0);
+    const goal = Number(target || 0);
+    if (!goal || goal <= 0) return 0;
+    return Math.max(0, Math.min(100, Math.round((current / goal) * 100)));
   },
 
   async _submitRecord() {
@@ -227,23 +376,26 @@ const DietPage = {
     ['err-diet-meal','err-diet-ingredients'].forEach(id => {
       const e = document.getElementById(id); if (e) e.textContent = '';
     });
-    const isZh = I18n.lang === 'zh';
-    if (!meal) { document.getElementById('err-diet-meal').textContent = isZh ? '请选择餐次' : 'Select meal type'; ok = false; }
-    if (!ingredients) { document.getElementById('err-diet-ingredients').textContent = isZh ? '请输入食材清单' : 'Enter ingredient list'; ok = false; }
+    if (!meal) { document.getElementById('err-diet-meal').textContent = I18n.t('diet.err_select_meal'); ok = false; }
+    if (!ingredients) { document.getElementById('err-diet-ingredients').textContent = I18n.t('diet.err_enter_ingredients'); ok = false; }
     if (!ok) return;
 
     const btn = document.getElementById('diet-log-btn');
+    const originalText = btn.textContent;
     btn.disabled = true;
+    btn.textContent = I18n.t('diet.saving');
     try {
-      await API.logDietIngredients({ meal_type: meal, ingredients });
-      App.showToast(isZh ? '饮食记录已保存' : 'Food logged', 'success');
-      document.getElementById('diet-meal').value = '';
+      const result = await API.logDietIngredients({ meal_type: meal, ingredients });
+      const pending = result.nutrition_status === 'pending';
+      App.showToast(pending ? I18n.t('diet.saved_pending') : I18n.t('diet.saved_estimated'), pending ? 'info' : 'success');
       document.getElementById('diet-ingredients').value = '';
       await this._loadTodayData();
     } catch (err) {
       App.showToast(err.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
     }
-    btn.disabled = false;
   },
 
   async _deleteLog(id) {
@@ -264,6 +416,22 @@ const DietPage = {
       await this._loadTodayData();
     } catch (err) {
       App.showToast(err.message, 'error');
+    }
+  },
+
+  async _reanalyzeLog(id) {
+    const isZh = I18n.lang === 'zh';
+    App.showToast(I18n.t('diet.reanalyzing'), 'info');
+    try {
+      const result = await API.reanalyzeDietLog(id);
+      if (result.nutrition_status === 'estimated') {
+        App.showToast(I18n.t('diet.reanalyze_done'), 'success');
+      } else {
+        App.showToast(I18n.t('diet.reanalyze_pending'), 'info');
+      }
+      await this._loadTodayData();
+    } catch (err) {
+      App.showToast(err.message || (isZh ? '重新分析失败' : 'Reanalysis failed'), 'error');
     }
   },
 
@@ -302,8 +470,11 @@ const DietPage = {
       const ingPreview = (r.ingredients || '').split('\n').slice(0, 3).join('\n');
       return `
         <div class="recipe-card">
-          ${r.is_builtin ? '' : `<span class="recipe-user-badge">${isZh ? '自定义' : 'Custom'}</span>`}
+          ${r.community_status === 'published'
+            ? `<span class="recipe-user-badge">${isZh ? '社区' : 'Community'}</span>`
+            : (r.is_builtin ? '' : `<span class="recipe-user-badge">${isZh ? '自定义' : 'Custom'}</span>`)}
           <div class="recipe-card-title">${this._esc(r.name)}</div>
+          ${r.low_fat_score ? `<div class="recipe-community-inline-score">${isZh ? '低脂评分' : 'Low-fat score'} ${Number(r.low_fat_score)}/100</div>` : ''}
           <div class="recipe-card-preview">${this._esc(ingPreview)}</div>
           <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
             <button class="btn btn-ghost btn-sm" onclick="DietPage._showRecipeModal(${r.id})">
@@ -313,7 +484,7 @@ const DietPage = {
               onclick="DietPage._addRecipeToLog(${r.id})">
               ${isZh ? '+ 记录' : '+ Log'}
             </button>
-            <button class="btn btn-sm btn-ghost" onclick="DietPage._openAddToPlanModal(${r.id}, '${this._esc(r.name)}')">
+            <button class="btn btn-sm btn-ghost" onclick="DietPage._openAddToPlanModal(${r.id})">
               ${isZh ? '📅 计划' : '📅 Plan'}
             </button>
           </div>
@@ -329,10 +500,11 @@ const DietPage = {
     const isZh = I18n.lang === 'zh';
     const ingHtml = (r.ingredients || '').split('\n').map(l => `<div style="padding:2px 0">${this._esc(l)}</div>`).join('');
     const stepsHtml = (r.steps || '').split('\n').map(l => `<div style="padding:2px 0">${this._esc(l)}</div>`).join('');
-    const videoHtml = r.video_url
+    const safeVideoUrl = this._safeUrl(r.video_url);
+    const videoHtml = safeVideoUrl
       ? `<div style="margin-top:14px">
            <div style="font-weight:600;margin-bottom:6px">${I18n.t('diet.recipe_video')}</div>
-           <a href="${this._esc(r.video_url)}" target="_blank" rel="noopener"
+            <a href="${this._esc(safeVideoUrl)}" target="_blank" rel="noopener"
               class="btn btn-ghost btn-sm">▶ ${isZh ? '观看视频' : 'Watch Video'}</a>
          </div>`
       : `<div style="margin-top:10px;font-size:0.78rem;color:var(--text-3)">${I18n.t('diet.no_video')}</div>`;
@@ -388,6 +560,320 @@ const DietPage = {
       App.showToast(isZh ? '已添加到饮食记录' : 'Added to diet log', 'success');
       // Refresh record tab data in background
       this._loadTodayData();
+    } catch (err) {
+      App.showToast(err.message, 'error');
+    }
+  },
+
+  /* ── Low-fat Recipe Community ─────────────────────────────── */
+
+  async _loadCommunityRecipes() {
+    const container = document.getElementById('community-recipe-list');
+    if (!container) return;
+    container.innerHTML = `<div style="color:var(--text-3);padding:12px 0">${I18n.t('common.loading')}</div>`;
+    try {
+      this._communityRecipes = await API.getCommunityRecipes();
+      this._renderCommunityRecipes();
+    } catch (err) {
+      this._communityRecipes = [];
+      container.innerHTML = `<div style="color:var(--rust);padding:12px 0">${this._esc(err.message)}</div>`;
+    }
+  },
+
+  _renderCommunityRecipes() {
+    const container = document.getElementById('community-recipe-list');
+    if (!container) return;
+    const isZh = I18n.lang === 'zh';
+    const items = this._communityRecipes || [];
+    if (!items.length) {
+      container.innerHTML = `<div class="recipe-community-empty">${isZh ? '还没有社区菜谱，先发一道你常做的低脂菜。' : 'No community recipes yet. Share a low-fat dish you actually cook.'}</div>`;
+      return;
+    }
+    container.innerHTML = `
+      <div class="community-recipe-grid">
+        ${items.map(r => this._communityRecipeCard(r, isZh)).join('')}
+      </div>`;
+  },
+
+  _communityRecipeCard(r, isZh) {
+    const assessment = r.low_fat_assessment || {};
+    const nutrition = assessment.estimated_nutrition_per_serving || {};
+    const rating = r.community_rating_count
+      ? `${Number(r.community_rating_avg || 0).toFixed(1)} / 5 · ${r.community_rating_count}`
+      : (isZh ? '等待试做评分' : 'No trial ratings yet');
+    const summary = assessment.summary_zh || '';
+    return `
+      <article class="community-recipe-card">
+        <div class="community-recipe-top">
+          <div>
+            <div class="recipe-card-title">${this._esc(r.name)}</div>
+            <div class="community-recipe-meta">${this._esc(r.category || (isZh ? '社区菜谱' : 'Community recipe'))}</div>
+          </div>
+          <span class="low-fat-score ${this._scoreClass(r.low_fat_score)}">${Number(r.low_fat_score || 0)}</span>
+        </div>
+        <div class="community-recipe-summary">${this._esc(summary)}</div>
+        <div class="community-macro-row">
+          <span>${Math.round(Number(nutrition.kcal || 0)) || '--'} kcal</span>
+          <span>P ${this._formatMacro(nutrition.protein_g)}g</span>
+          <span>F ${this._formatMacro(nutrition.fat_g)}g</span>
+        </div>
+        <div class="community-rating-row">
+          <span>${this._esc(rating)}</span>
+          ${r.my_trial_rating ? `<span>${isZh ? '已评分' : 'Rated'}</span>` : ''}
+        </div>
+        <div class="community-actions">
+          <button class="btn btn-ghost btn-sm" onclick="DietPage._showCommunityRecipeModal(${r.id})">${isZh ? '查看' : 'View'}</button>
+          <button class="btn btn-sm btn-primary" onclick="DietPage._showTrialRatingModal(${r.id})">${isZh ? '试做后评分' : 'Rate after trying'}</button>
+        </div>
+      </article>`;
+  },
+
+  _scoreClass(score) {
+    const n = Number(score || 0);
+    if (n >= 70) return 'good';
+    if (n >= 55) return 'warn';
+    return 'risk';
+  },
+
+  _showCommunitySubmitModal() {
+    const isZh = I18n.lang === 'zh';
+    App.openModal(
+      isZh ? '提交低脂菜谱' : 'Submit Low-fat Recipe',
+      `<div class="community-submit-form">
+         <div class="form-group">
+           <label>${isZh ? '菜名 *' : 'Recipe name *'}</label>
+           <input id="community-name" class="form-control" placeholder="${isZh ? '例：少油青椒鸡胸肉' : 'e.g. Low-oil pepper chicken breast'}">
+         </div>
+         <div class="form-group">
+           <label>${isZh ? '几人份' : 'Servings'}</label>
+           <input id="community-servings" class="form-control" type="number" min="1" max="20" value="1">
+         </div>
+         <div class="form-group">
+           <label>${isZh ? '食材和克数 *' : 'Ingredients and grams *'}</label>
+           <textarea id="community-ingredients" class="form-textarea" rows="5"
+             placeholder="${isZh ? '鸡胸肉 160g\n西兰花 220g\n食用油 6g' : 'chicken breast 160g\nbroccoli 220g\noil 6g'}"></textarea>
+         </div>
+         <div class="form-group">
+           <label>${isZh ? '制作流程 *' : 'Cooking method *'}</label>
+           <textarea id="community-steps" class="form-textarea" rows="5"
+             placeholder="${isZh ? '1. 西兰花焯水\n2. 鸡胸肉少油快炒' : '1. Blanch broccoli\n2. Stir-fry chicken with little oil'}"></textarea>
+         </div>
+         <div class="form-group">
+           <label>${isZh ? '视频链接（可选）' : 'Video URL (optional)'}</label>
+           <input id="community-video" class="form-control" placeholder="https://...">
+         </div>
+         <div id="community-assessment-preview"></div>
+       </div>`,
+      `<button class="btn btn-ghost" onclick="App.closeModal()">${I18n.t('common.cancel')}</button>
+       <button class="btn btn-ghost" id="community-analyze-btn" onclick="DietPage._analyzeCommunityRecipe()">${isZh ? 'AI 评分' : 'AI Score'}</button>
+       <button class="btn btn-primary" id="community-publish-btn" onclick="DietPage._publishCommunityRecipe()">${isZh ? '评分并发布' : 'Score and publish'}</button>`
+    );
+  },
+
+  _communityPayloadFromForm() {
+    return {
+      name: document.getElementById('community-name')?.value.trim() || '',
+      servings: Number(document.getElementById('community-servings')?.value || 1),
+      ingredients: document.getElementById('community-ingredients')?.value.trim() || '',
+      steps: document.getElementById('community-steps')?.value.trim() || '',
+      video_url: document.getElementById('community-video')?.value.trim() || null,
+      category: 'community_low_fat',
+    };
+  },
+
+  _validateCommunityPayload(payload) {
+    const isZh = I18n.lang === 'zh';
+    if (!payload.name || !payload.ingredients || !payload.steps) {
+      App.showToast(isZh ? '请填写菜名、食材和制作流程' : 'Fill in name, ingredients, and method', 'error');
+      return false;
+    }
+    if (!Number.isFinite(payload.servings) || payload.servings < 1 || payload.servings > 20) {
+      App.showToast(isZh ? '份数需要在 1-20 之间' : 'Servings must be 1-20', 'error');
+      return false;
+    }
+    return true;
+  },
+
+  async _analyzeCommunityRecipe() {
+    const payload = this._communityPayloadFromForm();
+    if (!this._validateCommunityPayload(payload)) return;
+    const btn = document.getElementById('community-analyze-btn');
+    if (btn) { btn.disabled = true; btn.textContent = I18n.t('common.loading'); }
+    try {
+      const assessment = await API.analyzeCommunityRecipe(payload);
+      const box = document.getElementById('community-assessment-preview');
+      if (box) box.innerHTML = this._assessmentHtml(assessment);
+    } catch (err) {
+      App.showToast(err.message, 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = I18n.lang === 'zh' ? 'AI 评分' : 'AI Score';
+      }
+    }
+  },
+
+  async _publishCommunityRecipe() {
+    const payload = this._communityPayloadFromForm();
+    if (!this._validateCommunityPayload(payload)) return;
+    const btn = document.getElementById('community-publish-btn');
+    if (btn) { btn.disabled = true; btn.textContent = I18n.t('common.loading'); }
+    try {
+      const recipe = await API.createCommunityRecipe(payload);
+      App.closeModal();
+      this._communityRecipes = null;
+      this._recipes = null;
+      await this._loadCommunityRecipes();
+      await this._loadRecipeLibrary();
+      App.showToast(I18n.lang === 'zh' ? `已发布，低脂评分 ${recipe.low_fat_score}/100` : `Published with score ${recipe.low_fat_score}/100`, 'success');
+    } catch (err) {
+      App.showToast(err.message, 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = I18n.lang === 'zh' ? '评分并发布' : 'Score and publish';
+      }
+    }
+  },
+
+  _assessmentHtml(assessment) {
+    const isZh = I18n.lang === 'zh';
+    const nutrition = assessment.estimated_nutrition_per_serving || {};
+    const scores = assessment.dimension_scores || {};
+    const suggestions = assessment.suggestions || [];
+    return `
+      <div class="community-assessment ${this._scoreClass(assessment.score)}">
+        <div class="community-assessment-head">
+          <span>${isZh ? '低脂适配分' : 'Low-fat score'}</span>
+          <strong>${Number(assessment.score || 0)} / 100</strong>
+        </div>
+        <p>${this._esc(assessment.summary_zh || '')}</p>
+        <div class="community-macro-row">
+          <span>${Math.round(Number(nutrition.kcal || 0)) || '--'} kcal</span>
+          <span>P ${this._formatMacro(nutrition.protein_g)}g</span>
+          <span>C ${this._formatMacro(nutrition.carbs_g)}g</span>
+          <span>F ${this._formatMacro(nutrition.fat_g)}g</span>
+        </div>
+        <div class="community-score-grid">
+          ${Object.entries(scores).map(([key, value]) => `
+            <div><span>${this._dimensionLabel(key, isZh)}</span><strong>${Number(value || 0)}</strong></div>
+          `).join('')}
+        </div>
+        <ul class="community-suggestion-list">
+          ${suggestions.map(s => `<li>${this._esc(s)}</li>`).join('')}
+        </ul>
+      </div>`;
+  },
+
+  _dimensionLabel(key, isZh) {
+    const zh = {
+      fat_control: '脂肪控制',
+      calorie_density: '热量密度',
+      protein_quality: '蛋白质量',
+      fiber_and_vegetables: '蔬菜纤维',
+      cooking_method: '烹饪方式',
+      portion_clarity: '克数清晰度',
+    };
+    const en = {
+      fat_control: 'Fat control',
+      calorie_density: 'Calories',
+      protein_quality: 'Protein',
+      fiber_and_vegetables: 'Vegetables',
+      cooking_method: 'Method',
+      portion_clarity: 'Portions',
+    };
+    return (isZh ? zh : en)[key] || key;
+  },
+
+  async _showCommunityRecipeModal(recipeId) {
+    let r = (this._communityRecipes || []).find(x => x.id === recipeId);
+    if (!r) {
+      try {
+        await this._loadCommunityRecipes();
+        r = (this._communityRecipes || []).find(x => x.id === recipeId);
+      } catch {
+        return;
+      }
+    }
+    if (!r) return;
+    const isZh = I18n.lang === 'zh';
+    const ingHtml = (r.ingredients || '').split('\n').map(l => `<div>${this._esc(l)}</div>`).join('');
+    const stepsHtml = (r.steps || '').split('\n').map(l => `<div>${this._esc(l)}</div>`).join('');
+    App.openModal(
+      this._esc(r.name),
+      `<div class="community-detail">
+         ${this._assessmentHtml(r.low_fat_assessment || {})}
+         <div class="community-detail-section">
+           <h4>${isZh ? '食材' : 'Ingredients'}</h4>
+           <div>${ingHtml}</div>
+         </div>
+         <div class="community-detail-section">
+           <h4>${isZh ? '做法' : 'Method'}</h4>
+           <div>${stepsHtml}</div>
+         </div>
+       </div>`,
+      `<button class="btn btn-ghost" onclick="App.closeModal()">${I18n.t('common.cancel')}</button>
+       <button class="btn btn-primary" onclick="DietPage._showTrialRatingModal(${r.id})">${isZh ? '试做后评分' : 'Rate after trying'}</button>`
+    );
+  },
+
+  _showTrialRatingModal(recipeId) {
+    const r = (this._communityRecipes || []).find(x => x.id === recipeId);
+    if (!r) return;
+    const isZh = I18n.lang === 'zh';
+    const existing = r.my_trial_rating || {};
+    const ratingOptions = [5, 4, 3, 2, 1].map(v =>
+      `<option value="${v}" ${Number(existing.rating || 5) === v ? 'selected' : ''}>${v}</option>`
+    ).join('');
+    App.openModal(
+      isZh ? '试做评分' : 'Trial Rating',
+      `<div class="community-submit-form">
+         <div class="form-group">
+           <label>${isZh ? '满意度评分' : 'Satisfaction rating'}</label>
+           <select id="trial-rating" class="form-control">${ratingOptions}</select>
+         </div>
+         <div class="form-group">
+           <label>${isZh ? '饱腹感' : 'Satiety'}</label>
+           <select id="trial-satiety" class="form-control">
+             <option value="">--</option>
+             ${[5,4,3,2,1].map(v => `<option value="${v}" ${Number(existing.satiety_score || 0) === v ? 'selected' : ''}>${v}</option>`).join('')}
+           </select>
+         </div>
+         <div class="form-group">
+           <label>${isZh ? '制作难度' : 'Difficulty'}</label>
+           <select id="trial-difficulty" class="form-control">
+             <option value="">--</option>
+             ${[1,2,3,4,5].map(v => `<option value="${v}" ${Number(existing.difficulty_score || 0) === v ? 'selected' : ''}>${v}</option>`).join('')}
+           </select>
+         </div>
+         <label class="community-checkbox">
+           <input id="trial-again" type="checkbox" ${existing.would_cook_again ? 'checked' : ''}>
+           <span>${isZh ? '我愿意再做一次' : 'I would cook it again'}</span>
+         </label>
+         <div class="form-group">
+           <label>${isZh ? '反馈' : 'Feedback'}</label>
+           <textarea id="trial-feedback" class="form-textarea" rows="4" placeholder="${isZh ? '口味、饱腹感、哪里需要改...' : 'Taste, satiety, what to improve...'}">${this._esc(existing.feedback || '')}</textarea>
+         </div>
+       </div>`,
+      `<button class="btn btn-ghost" onclick="App.closeModal()">${I18n.t('common.cancel')}</button>
+       <button class="btn btn-primary" onclick="DietPage._submitTrialRating(${recipeId})">${I18n.t('common.save')}</button>`
+    );
+  },
+
+  async _submitTrialRating(recipeId) {
+    const body = {
+      rating: Number(document.getElementById('trial-rating')?.value || 5),
+      satiety_score: document.getElementById('trial-satiety')?.value ? Number(document.getElementById('trial-satiety').value) : null,
+      difficulty_score: document.getElementById('trial-difficulty')?.value ? Number(document.getElementById('trial-difficulty').value) : null,
+      would_cook_again: !!document.getElementById('trial-again')?.checked,
+      feedback: document.getElementById('trial-feedback')?.value.trim() || null,
+    };
+    try {
+      const updated = await API.rateCommunityRecipe(recipeId, body);
+      this._communityRecipes = (this._communityRecipes || []).map(item => item.id === recipeId ? updated : item);
+      this._renderCommunityRecipes();
+      App.closeModal();
+      App.showToast(I18n.lang === 'zh' ? '评分已保存' : 'Rating saved', 'success');
     } catch (err) {
       App.showToast(err.message, 'error');
     }
@@ -493,7 +979,7 @@ const DietPage = {
           </div>`;
       }
     } catch (err) {
-      resultsEl.innerHTML = `<div style="color:var(--rust);font-size:0.84rem">${err.message}</div>`;
+      resultsEl.innerHTML = `<div style="color:var(--rust);font-size:0.84rem">${this._esc(err.message)}</div>`;
     }
 
     btn.disabled = false;
@@ -529,7 +1015,7 @@ const DietPage = {
       const data = await API.getMealPlanWeek();
       this._drawWeekPlan(data);
     } catch (err) {
-      container.innerHTML = `<div style="color:var(--rust);padding:12px">${err.message}</div>`;
+      container.innerHTML = `<div style="color:var(--rust);padding:12px">${this._esc(err.message)}</div>`;
     }
   },
 
@@ -601,6 +1087,10 @@ const DietPage = {
   _openAddToPlanModal(recipeId, recipeName, presetDate, presetMeal) {
     const isZh = I18n.lang === 'zh';
     const t = k => I18n.t(k);
+    if (recipeId && !recipeName) {
+      const recipe = (this._recipes || []).find(r => r.id === recipeId);
+      recipeName = recipe?.name || '';
+    }
 
     // Build date options: today ±3
     const today = new Date();
@@ -725,9 +1215,20 @@ const DietPage = {
   /* ── Utility ────────────────────────────────────────────────── */
 
   _esc(str) {
-    if (!str) return '';
+    if (str === null || str === undefined) return '';
     return String(str)
       .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-      .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
+  },
+
+  _safeUrl(raw) {
+    if (!raw) return '';
+    try {
+      const url = new URL(String(raw), window.location.origin);
+      return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+    } catch {
+      return '';
+    }
   },
 };

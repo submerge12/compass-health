@@ -101,6 +101,13 @@ _ROLE_TO_NUTRIENT_KEY: dict[str, str] = {
 }
 
 
+def rda_for_gender(meta: dict, gender: str = "female", default: float = 1.0) -> float:
+    """Return the food-library RDA value for a profile gender."""
+    normalized = (gender or "female").strip().lower()
+    key = "rda_men" if normalized in {"male", "man", "men", "m"} else "rda_women"
+    return float(meta.get(key, meta.get("rda_women", default)) or default)
+
+
 def _practical_coverage_pct(slug: str, role: str, gender: str = "female") -> float:
     """Return how many % of the RDA this food covers at its max practical serving."""
     entry = FL.FOOD_LIBRARY.get(slug)
@@ -118,7 +125,7 @@ def _practical_coverage_pct(slug: str, role: str, gender: str = "female") -> flo
         return 0.0
 
     max_g = entry.get("max_practical_serving_g", 200.0)
-    rda = meta.get(f"rda_{gender}", meta.get("rda_women", 1.0)) or 1.0
+    rda = rda_for_gender(meta, gender, 1.0)
 
     daily_amount = amount_per_100g * max_g / 100.0
     return daily_amount / rda * 100.0
@@ -145,7 +152,7 @@ def _sufficiency_check(
     """
     result: dict[str, dict] = {}
     for role, meta in FL.MICRONUTRIENT_ROLES.items():
-        rda = meta.get(f"rda_{gender}", meta.get("rda_women", 1.0)) or 1.0
+        rda = rda_for_gender(meta, gender, 1.0)
         unit = meta.get("unit", "")
         nutrient_key = _ROLE_TO_NUTRIENT_KEY.get(role)
 
@@ -290,6 +297,7 @@ _BLOCKING_BUCKETS = {"staple", "lean_protein", "red_meat_shellfish", "calcium"}
 def _feasibility(
     validation: dict[str, list[str]],
     micronutrients: dict[str, dict],
+    sufficiency: dict[str, dict] | None = None,
 ) -> dict:
     buckets_detail: dict[str, dict] = {}
     missing_blocking: list[str] = []
@@ -314,10 +322,19 @@ def _feasibility(
         role for role, info in micronutrients.items()
         if info["status"] == "missing"
     ]
+    sufficiency_gaps = [
+        {
+            "role": role,
+            "status": info.get("status"),
+            "best_coverage_pct": info.get("best_coverage_pct", 0),
+        }
+        for role, info in (sufficiency or {}).items()
+        if info.get("status") in {"missing", "impractical", "thin"}
+    ]
 
     if missing_blocking:
         overall = "not_closed_loop"
-    elif missing_soft or missing_nutrients:
+    elif missing_soft or missing_nutrients or sufficiency_gaps:
         overall = "feasible_with_gaps"
     else:
         overall = "feasible"
@@ -328,6 +345,7 @@ def _feasibility(
         "missing_blocking_buckets": missing_blocking,
         "missing_soft_buckets": missing_soft,
         "missing_nutrients": missing_nutrients,
+        "sufficiency_gaps": sufficiency_gaps,
     }
 
 
@@ -336,6 +354,7 @@ def _feasibility(
 def _suggestions(
     validation: dict[str, list[str]],
     micronutrients: dict[str, dict],
+    sufficiency: dict[str, dict] | None = None,
 ) -> list[dict]:
     out: list[dict] = []
 
@@ -390,6 +409,54 @@ def _suggestions(
             ),
         })
 
+    for role, info in (sufficiency or {}).items():
+        status = info.get("status")
+        if status not in {"missing", "impractical", "thin"}:
+            continue
+        meta = FL.MICRONUTRIENT_ROLES.get(role, {})
+        label_zh = info.get("label_zh") or meta.get("zh", role)
+        label_en = info.get("label_en") or meta.get("en", role)
+        have = {
+            carrier.get("slug")
+            for carrier in info.get("carriers", [])
+            if carrier.get("slug")
+        }
+        nutrient_key = _ROLE_TO_NUTRIENT_KEY.get(role)
+        ranked: list[tuple[float, str]] = []
+        for slug in FL.slugs_by_micronutrient(role):
+            if slug in have:
+                continue
+            entry = FL.FOOD_LIBRARY.get(slug)
+            if not entry:
+                continue
+            amount_per_100g = float(entry.get("nutrients", {}).get(nutrient_key or "", 0.0) or 0.0)
+            max_g = float(entry.get("max_practical_serving_g", 200.0) or 200.0)
+            ranked.append((amount_per_100g * max_g / 100.0, slug))
+        ranked.sort(reverse=True)
+        candidates = [slug for _, slug in ranked[:6]]
+        resolution = "add_concentrated_source" if status in {"missing", "impractical"} else "frequency_or_source"
+        out.append({
+            "kind": "sufficiency",
+            "ref": role,
+            "label_zh": label_zh,
+            "label_en": label_en,
+            "resolution": resolution,
+            "best_coverage_pct": info.get("best_coverage_pct", 0),
+            "candidates": [{"slug": c, "name_zh": FL.display_name(c, "zh"),
+                            "name_en": FL.display_name(c, "en")} for c in candidates],
+            "message_zh": (
+                f"{label_zh} 的实际可达覆盖不足。"
+                + ("建议加入更高效的来源。" if resolution == "add_concentrated_source"
+                   else "建议提高出现频率，或加入更高效的替代来源。")
+            ),
+            "message_en": (
+                f"{label_en} is not practically covered at normal serving sizes. "
+                + ("Add a more concentrated source."
+                   if resolution == "add_concentrated_source"
+                   else "Increase frequency or add a more concentrated source.")
+            ),
+        })
+
     return out
 
 
@@ -401,10 +468,10 @@ def run_audit(db: Session, user: models.User) -> dict:
     classification = _classify_library(slugs)
     validation = _validation_coverage(slugs)
     micronutrients = _micronutrient_coverage(slugs)
-    verdict = _feasibility(validation, micronutrients)
-    non_subs = _non_substitutable(validation, micronutrients)
-    fixes = _suggestions(validation, micronutrients)
     sufficiency = _sufficiency_check(slugs, gender)
+    verdict = _feasibility(validation, micronutrients, sufficiency)
+    non_subs = _non_substitutable(validation, micronutrients)
+    fixes = _suggestions(validation, micronutrients, sufficiency)
 
     # Per-food substitute map (within library only)
     substitute_map = {

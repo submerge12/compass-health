@@ -143,7 +143,7 @@ const WaterPage = {
     const container = document.getElementById('water-bar-chart');
     if (!container || !history) return;
     const max = Math.max(...history.map(d => d.total_ml), 1);
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = this._todayDateString();
     container.innerHTML = history.map(d => {
       const h = Math.round((d.total_ml / max) * 80);
       const label = d.date.slice(5);
@@ -154,6 +154,14 @@ const WaterPage = {
           <div class="bar-label">${label}</div>
         </div>`;
     }).join('');
+  },
+
+  _todayDateString() {
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
   },
 
   async _logWater(amount) {

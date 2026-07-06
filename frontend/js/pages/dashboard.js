@@ -5,6 +5,25 @@
 const DashboardPage = {
   _recipeCache: {},
 
+  _localizedRecipeName(name) {
+    const raw = String(name || '').trim();
+    if (!raw) return raw;
+    const zh = {
+      'fixed breakfast': '固定早餐',
+      'breakfast': '早餐',
+      '2 eggs + 200ml milk': '2个鸡蛋 + 200ml 牛奶',
+      '2 eggs + 200 ml milk': '2个鸡蛋 + 200ml 牛奶',
+    };
+    const en = {
+      '固定早餐': 'Fixed breakfast',
+      '早餐': 'Breakfast',
+      '2个鸡蛋 + 200ml 牛奶': '2 eggs + 200ml milk',
+    };
+    const key = raw.toLowerCase();
+    if (I18n.lang === 'en') return en[raw] || raw;
+    return zh[key] || raw;
+  },
+
   async render() {
     const el = document.getElementById('page-dashboard');
     if (!el) return;
@@ -353,7 +372,7 @@ const DashboardPage = {
       `;
     }
 
-    const name = (entry.recipe && entry.recipe.name) || entry.custom_name || this._mealLabel(mealType);
+    const name = this._localizedRecipeName((entry.recipe && entry.recipe.name) || entry.custom_name || this._mealLabel(mealType));
     const detail = entry.recipe_id ? recipeMap[entry.recipe_id] : null;
     const meta = detail && detail.calories ? `${this._formatNumber(detail.calories)} ${t('common.kcal')}` : t('home.week.custom_meal');
 
@@ -422,7 +441,7 @@ const DashboardPage = {
     const t = k => I18n.t(k);
     const fixedItems = fixedMeals.slice(0, 5).map(item => `
       <span class="home-chip">
-        ${this._esc(`${this._weekdayLabel(item.weekday)} ${this._mealLabel(item.meal_type)} · ${(item.recipe_name || item.custom_name || t('home.week.custom_meal'))}`)}
+        ${this._esc(`${this._weekdayLabel(item.weekday)} ${this._mealLabel(item.meal_type)} · ${this._localizedRecipeName(item.recipe_name || item.custom_name || t('home.week.custom_meal'))}`)}
       </span>
     `).join('');
 

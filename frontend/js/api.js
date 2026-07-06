@@ -631,3 +631,475 @@ API._tryRefresh = async function(parentContext = null) {
     return false;
   }
 };
+
+
+/* ============================================================
+   display-v2 wiring — agent-backed meal engine
+   The functions below override their FastAPI versions and read
+   from the compass-health-agent display API instead
+   (`pnpm serve:display`, default http://127.0.0.1:8788).
+   Everything not overridden here still uses API_BASE.
+   Contract: compass-health-agent/docs/display-interface-plan.md
+   ============================================================ */
+
+const AGENT_API_BASE = localStorage.getItem('ch_display_api') || 'http://127.0.0.1:8788';
+
+API._agentRequest = async function(method, path, body = null) {
+  let res;
+  try {
+    res = await fetch(`${AGENT_API_BASE}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === null ? undefined : JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new Error(I18n.lang === 'zh'
+      ? '无法连接营养引擎显示服务 — 请在 compass-health-agent 目录运行 pnpm serve:display'
+      : 'Cannot reach the agent display API — run `pnpm serve:display` in compass-health-agent');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+};
+
+/* ── shared agent-side helpers ── */
+
+API._agentFoodsCache = null;
+API._agentFoods = async function() {
+  if (!this._agentFoodsCache) {
+    const data = await this._agentRequest('GET', '/api/foods');
+    this._agentFoodsCache = new Map((data.foods || []).map(f => [f.slug, f]));
+  }
+  return this._agentFoodsCache;
+};
+
+API._agentMonday = function(fromDate) {
+  const d = fromDate ? new Date(`${fromDate}T00:00:00`) : new Date();
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+API._agentWeekdayLabels = function(dateIso) {
+  const day = new Date(`${dateIso}T00:00:00`).getDay();
+  return {
+    zh: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][day],
+    en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][day],
+  };
+};
+
+API._agentIngredientList = function(rawList, foods) {
+  return (rawList || []).map(item => {
+    const food = foods.get(item.slug);
+    return {
+      slug: item.slug,
+      grams: item.grams,
+      name_zh: food ? (food.nameZh || food.name) : null,
+      name_en: food ? food.name : null,
+    };
+  });
+};
+
+API._AGENT_METHOD_ZH = {
+  stir_fry: '炒', braising: '红烧/卤', steaming: '清蒸',
+  boiling: '汆/煮', pan_searing: '香煎', cold_mixing: '凉拌',
+};
+
+/* Build the arranged-week shape the weekly menu overview renders, from the
+   STORED week (GET /api/plan). Calories come per meal and per day. */
+API.getStoredArrangedWeek = async function() {
+  const monday = this._agentMonday();
+  const [view, profileRes, foods] = await Promise.all([
+    this._agentRequest('GET', `/api/plan?start=${monday}&days=7`),
+    this._agentRequest('GET', '/api/profile').catch(() => null),
+    this._agentFoods(),
+  ]);
+  const hasEntries = (view.days || []).some(d => (d.entries || []).length > 0);
+  if (!hasEntries) return null;
+  const calorieTarget = profileRes && profileRes.profile ? profileRes.profile.targetKcal : null;
+
+  const days = view.days.map(day => {
+    const meals = {};
+    for (const row of day.entries) {
+      meals[row.mealType] = {
+        name: row.dishName,
+        source: row.status === 'planned' ? 'selected' : row.status,
+        totals: {
+          kcal: Math.round(row.caloriesKcal),
+          protein_g: row.proteinGrams,
+          carbs_g: row.carbsGrams,
+          fat_g: row.fatGrams,
+        },
+        ingredients: this._agentIngredientList(row.ingredientsJson, foods),
+        seasonings: [],
+        method_steps: '',
+      };
+    }
+    const labels = this._agentWeekdayLabels(day.date);
+    return {
+      date: day.date,
+      day_type: 'normal',
+      day_type_label_zh: labels.zh,
+      day_type_label_en: labels.en,
+      meals,
+      target: { calorie_target: calorieTarget },
+      totals: { kcal: day.totals.kcal },
+    };
+  });
+
+  return {
+    start_date: view.startDate,
+    days,
+    warnings: [],
+    micronutrients: {},
+    arranged_entry_count: view.days.reduce((n, d) => n + d.entries.length, 0),
+  };
+};
+
+/* ── pool: dish library as the candidate view ── */
+
+API._agentPoolPayload = async function(variant) {
+  const monday = this._agentMonday();
+  const [dishes, foods] = await Promise.all([
+    this._agentRequest('GET', '/api/dishes'),
+    this._agentFoods(),
+  ]);
+  const toDish = (d, sourceZh, sourceEn) => ({
+    slug: d.slug,
+    dish_id: d.slug,
+    name: d.name,
+    name_zh: d.name,
+    meal_type: (d.mealTypes || []).includes('breakfast') ? 'breakfast' : 'main',
+    totals: {
+      kcal: d.nutrition ? d.nutrition.kcal : (d.caloriesKcal ?? 0),
+      protein_g: d.nutrition ? d.nutrition.proteinGrams : (d.proteinGrams ?? 0),
+      carbs_g: d.nutrition ? d.nutrition.carbsGrams : (d.carbsGrams ?? 0),
+      fat_g: d.nutrition ? d.nutrition.fatGrams : (d.fatGrams ?? 0),
+    },
+    ingredients: this._agentIngredientList(d.ingredients || d.ingredientsJson, foods),
+    seasonings: [],
+    method_steps: this._AGENT_METHOD_ZH[d.method] || d.method || '',
+    source: 'library',
+    source_label_zh: sourceZh,
+    source_label_en: sourceEn,
+  });
+  const presets = (dishes.presets || []).map(d => toDish(d, '默认菜谱', 'Default recipes'));
+  const users = (dishes.userDishes || []).map(d => toDish(d, '我的菜', 'My dishes'));
+  const all = [...presets, ...users];
+  const week_skeleton = Array.from({ length: 7 }, (_, i) => {
+    const dd = new Date(`${monday}T00:00:00`);
+    dd.setDate(dd.getDate() + i);
+    const iso = `${dd.getFullYear()}-${String(dd.getMonth() + 1).padStart(2, '0')}-${String(dd.getDate()).padStart(2, '0')}`;
+    const labels = this._agentWeekdayLabels(iso);
+    return { date: iso, day_type: 'normal', day_type_label_zh: labels.zh, day_type_label_en: labels.en, is_locked: false };
+  });
+  return {
+    pool_tag: `agent:${monday}:${variant || 0}`,
+    start_date: monday,
+    variant: variant || 0,
+    breakfast_dishes: all.filter(d => d.meal_type === 'breakfast'),
+    main_dishes: all.filter(d => d.meal_type === 'main'),
+    requires_breakfast_pool: true,
+    requires_main_pool: true,
+    required_slot_counts: { breakfast: 7, lunch: 7, dinner: 7 },
+    week_skeleton,
+    llm_quota: null,
+    warnings: [],
+  };
+};
+
+API.nameMealPlanPool = function(variant) { return this._agentPoolPayload(variant); };
+API.getMealPlanPool = function(variant) { return this._agentPoolPayload(variant); };
+
+/* ── generation: one-shot full-week plan via the agent ── */
+
+API.arrangeMealPlan = async function(_body) {
+  const monday = this._agentMonday();
+  const result = await this._agentRequest('POST', '/api/plan/generate', { startDate: monday });
+  if (result.status === 'blocked') {
+    const reason = result.cannotSatisfy ? result.cannotSatisfy.reason : 'blocked';
+    const suggestions = result.cannotSatisfy ? (result.cannotSatisfy.suggestions || []) : [];
+    throw new Error([reason, ...suggestions].join(' · '));
+  }
+  const [profileRes, foods] = await Promise.all([
+    this._agentRequest('GET', '/api/profile').catch(() => null),
+    this._agentFoods(),
+  ]);
+  const calorieTarget = profileRes && profileRes.profile ? profileRes.profile.targetKcal : null;
+  const notices = [
+    ...(result.pool && result.pool.fatBudgetNotice ? [result.pool.fatBudgetNotice] : []),
+    ...((result.pool && result.pool.poolNotices) || []),
+  ];
+
+  const days = (result.plan.days || []).map(day => {
+    const meals = {};
+    for (const entry of day.meals) {
+      const parts = [
+        ...(entry.dish.ingredients || []),
+        ...((entry.side && entry.side.ingredients) || []),
+        ...((entry.proteinTopUps || []).flatMap(tp => tp.ingredients || [])),
+        ...(entry.staple ? [entry.staple] : []),
+      ];
+      meals[entry.mealType] = {
+        name: entry.side ? `${entry.dish.name} + ${entry.side.name}` : entry.dish.name,
+        source: 'selected',
+        totals: {
+          kcal: Math.round(entry.nutrition.kcal),
+          protein_g: entry.nutrition.proteinGrams,
+          carbs_g: entry.nutrition.carbsGrams,
+          fat_g: entry.nutrition.fatGrams,
+        },
+        ingredients: this._agentIngredientList(parts, foods),
+        seasonings: [],
+        method_steps: this._AGENT_METHOD_ZH[entry.dish.method] || entry.dish.method || '',
+      };
+    }
+    const labels = this._agentWeekdayLabels(day.date);
+    return {
+      date: day.date,
+      day_type: 'normal',
+      day_type_label_zh: labels.zh,
+      day_type_label_en: labels.en,
+      meals,
+      target: { calorie_target: calorieTarget },
+      totals: { kcal: Math.round(day.totals.kcal) },
+    };
+  });
+
+  return {
+    start_date: result.plan.startDate,
+    days,
+    warnings: notices,
+    micronutrients: {},
+    arranged_entry_count: (result.plan.entries || []).length,
+  };
+};
+
+/* ── grocery list ── */
+
+API._AGENT_CATEGORY_ZH = {
+  meat: '肉类', poultry: '禽类', seafood: '海鲜', vegetable: '蔬菜',
+  grain: '谷物', legume: '豆类', dairy: '乳制品', nut: '坚果',
+  fruit: '水果', egg: '蛋类', oil: '油脂', starch: '淀粉',
+  tuber: '薯类', mushroom: '菌菇', seaweed: '海藻', bread: '面包', other: '其他',
+};
+
+API.mealEngineProcurement = async function(startDate) {
+  const start = startDate || this._agentMonday();
+  const [proc, foods] = await Promise.all([
+    this._agentRequest('GET', `/api/procurement?start=${start}&days=7`),
+    this._agentFoods(),
+  ]);
+  const items = proc.items || [];
+  if (items.length === 0) {
+    return {
+      feasibility: 'not_closed_loop',
+      message_zh: '本周还没有已排菜单 — 先在「餐单」页生成一周菜单。',
+      message_en: 'Nothing planned for this week yet — generate a weekly plan first.',
+    };
+  }
+  const byCategory = new Map();
+  for (const item of items) {
+    const food = foods.get(item.slug);
+    const category = (food && food.category) || 'other';
+    if (!byCategory.has(category)) byCategory.set(category, []);
+    byCategory.get(category).push({
+      slug: item.slug,
+      name_zh: food ? (food.nameZh || food.name) : item.slug,
+      name_en: food ? food.name : item.slug,
+      meal_count: item.dishCount,
+      planned_g: item.totalGrams,
+      recommended_g: item.bufferedGrams,
+      is_key_food: false,
+      replaceable: false,
+    });
+  }
+  return {
+    feasibility: 'ok',
+    total_slugs: items.length,
+    total_planned_g: items.reduce((sum, item) => sum + item.totalGrams, 0),
+    warnings: [],
+    groups: [...byCategory.entries()].map(([category, rows]) => ({
+      label_zh: this._AGENT_CATEGORY_ZH[category] || category,
+      label_en: category.charAt(0).toUpperCase() + category.slice(1),
+      rows,
+    })),
+  };
+};
+
+/* ── fixed food items (was: fixed meals) ── */
+
+API.listFixedMeals = async function() {
+  const foods = await this._agentFoods();
+  const items = [...foods.values()].map((food, index) => ({
+    id: index + 1,
+    recipe_name: food.nameZh || food.name || food.slug,
+    custom_name: null,
+    weekday: null,
+    meal_type: 'food_item',
+    portion_g: 100,
+    calories: food.kcalPer100g,
+    protein_g: food.proteinGramsPer100g,
+    carbs_g: food.carbsGramsPer100g,
+    fat_g: food.fatGramsPer100g,
+  }));
+  return { items };
+};
+
+API._agentReadOnly = function() {
+  return Promise.reject(new Error(I18n.lang === 'zh'
+    ? '固定食材来自营养引擎的食材库,在 compass-health-agent 的 seed 数据中维护'
+    : 'Fixed food items come from the agent seed catalog; edit them in compass-health-agent'));
+};
+API.createFixedMeal = function() { return this._agentReadOnly(); };
+API.updateFixedMeal = function() { return this._agentReadOnly(); };
+API.deleteFixedMeal = function() { return this._agentReadOnly(); };
+
+/* ── default recipes (was: saved recipes) ── */
+
+API.listSavedRecipes = async function() {
+  const [dishes, foods] = await Promise.all([
+    this._agentRequest('GET', '/api/dishes'),
+    this._agentFoods(),
+  ]);
+  const zh = I18n.lang === 'zh';
+  const mealTypeLabel = types => (types || [])
+    .map(mt => zh
+      ? ({ breakfast: '早餐', lunch: '午餐', dinner: '晚餐' })[mt] || mt
+      : mt)
+    .join(' / ');
+  const items = (dishes.presets || []).map(d => ({
+    saved_at: '',
+    recipe: {
+      id: d.slug,
+      name: d.name,
+      calories: d.nutrition.kcal,
+      protein_g: d.nutrition.proteinGrams,
+      carbs_g: d.nutrition.carbsGrams,
+      fat_g: d.nutrition.fatGrams,
+      meal_types: mealTypeLabel(d.mealTypes),
+      ingredients: this._agentIngredientList(d.ingredients, foods),
+      steps: d.method ? [this._AGENT_METHOD_ZH[d.method] || d.method] : [],
+    },
+  }));
+  return { cap: items.length, count: items.length, items };
+};
+
+API.deleteSavedRecipe = function() {
+  return Promise.reject(new Error(I18n.lang === 'zh'
+    ? '默认菜谱不可删除 — 它们由营养引擎的预设菜库提供'
+    : 'Default recipes cannot be deleted — they come from the agent preset library'));
+};
+
+/* ── execution feedback (weekly review) ── */
+
+API.mealEngineDaily = async function() {
+  const d = new Date();
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const summary = await this._agentRequest('GET', `/api/summary?date=${date}`);
+  const rate = (actual, target) => (target > 0 ? actual / target : 0);
+  const status = r => (r > 1.1 ? 'over' : r < 0.9 ? 'under' : 'on_track');
+  const rates = {
+    kcal: rate(summary.eaten.kcal, summary.target.kcal),
+    protein: rate(summary.eaten.proteinGrams, summary.target.proteinGrams),
+    carbs: rate(summary.eaten.carbsGrams, summary.target.carbsGrams),
+    fat: rate(summary.eaten.fatGrams, summary.target.fatGrams),
+  };
+  return {
+    has_bmr_profile: summary.target.kcal > 0,
+    date: summary.date,
+    target: {
+      kcal: summary.target.kcal,
+      protein_g: summary.target.proteinGrams,
+      carbs_g: summary.target.carbsGrams,
+      fat_g: summary.target.fatGrams,
+    },
+    actual: {
+      kcal: summary.eaten.kcal,
+      protein_g: summary.eaten.proteinGrams,
+      carbs_g: summary.eaten.carbsGrams,
+      fat_g: summary.eaten.fatGrams,
+    },
+    achievement_rate: rates,
+    status: {
+      kcal: status(rates.kcal),
+      protein: status(rates.protein),
+      carbs: status(rates.carbs),
+      fat: status(rates.fat),
+    },
+    exercise_kcal: summary.exercise.kcalBurned,
+    net_kcal: summary.eaten.kcal - summary.exercise.kcalBurned,
+    notes: [],
+  };
+};
+
+API.mealEngineWeekly = async function() {
+  const d = new Date();
+  const endDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const [report, profileRes] = await Promise.all([
+    this._agentRequest('GET', `/api/report?endDate=${endDate}`),
+    this._agentRequest('GET', '/api/profile').catch(() => null),
+  ]);
+  const profile = profileRes && profileRes.profile ? profileRes.profile : null;
+  const kcalTarget = profile ? profile.targetKcal : 0;
+  const proteinTarget = profile ? profile.proteinTargetGrams : 0;
+  const avgProteinG = report.averageKcal > 0
+    ? (report.averageKcal * (report.macroSplit.proteinPct / 100)) / 4
+    : 0;
+  const adjustments = [
+    { kind: 'calorie_up', message_zh: report.weeklyBudgetLine, message_en: report.weeklyBudgetLine },
+    ...(report.suggestions || []).map(s => ({ kind: 'calorie_up', message_zh: s, message_en: s })),
+  ];
+  return {
+    has_bmr_profile: profile !== null,
+    averages: {
+      kcal: Math.round(report.averageKcal),
+      protein_g: Math.round(avgProteinG * 10) / 10,
+      kcal_achievement: kcalTarget > 0 ? report.averageKcal / kcalTarget : 0,
+      protein_achievement: proteinTarget > 0 ? avgProteinG / proteinTarget : 0,
+    },
+    weight_trend_kg: null,
+    adjustments,
+    message_zh: report.weeklyBudgetLine,
+    message_en: report.weeklyBudgetLine,
+  };
+};
+
+/* ── homepage weekly plan card (dashboard) ── */
+
+API._agentWeekKcal = new Map();
+
+API.getMealPlanWeek = async function() {
+  const monday = this._agentMonday();
+  const view = await this._agentRequest('GET', `/api/plan?start=${monday}&days=7`);
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  this._agentWeekKcal = new Map();
+  const days = (view.days || []).map(day => {
+    const meals = {};
+    for (const row of day.entries || []) {
+      const refId = `agent:${row.id}`;
+      this._agentWeekKcal.set(refId, Math.round(row.caloriesKcal));
+      meals[row.mealType] = {
+        recipe: { name: row.dishName },
+        recipe_id: refId,
+        custom_name: null,
+      };
+    }
+    return { date: day.date, meals };
+  });
+  return { today, days };
+};
+
+/* The dashboard resolves per-meal kcal through getRecipe(recipe_id); serve
+   agent-backed ids from the week cache and pass everything else through. */
+API._origGetRecipe = API.getRecipe.bind(API);
+API.getRecipe = function(recipeId) {
+  if (typeof recipeId === 'string' && recipeId.startsWith('agent:')) {
+    return Promise.resolve({ calories: this._agentWeekKcal.get(recipeId) || 0 });
+  }
+  return this._origGetRecipe(recipeId);
+};

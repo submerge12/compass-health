@@ -42,6 +42,25 @@ const MealEnginePage = {
     return I18n.t(this._WEEKDAY_I18N[wd] || 'plan.weekday_any');
   },
 
+  _localizedRecipeName(name) {
+    const raw = String(name || '').trim();
+    if (!raw) return raw;
+    const zh = {
+      'fixed breakfast': '固定早餐',
+      'breakfast': '早餐',
+      '2 eggs + 200ml milk': '2个鸡蛋 + 200ml 牛奶',
+      '2 eggs + 200 ml milk': '2个鸡蛋 + 200ml 牛奶',
+    };
+    const en = {
+      '固定早餐': 'Fixed breakfast',
+      '早餐': 'Breakfast',
+      '2个鸡蛋 + 200ml 牛奶': '2 eggs + 200ml milk',
+    };
+    const key = raw.toLowerCase();
+    if (I18n.lang === 'en') return en[raw] || raw;
+    return zh[key] || raw;
+  },
+
   _ACTIVITY_I18N: {
     sedentary:         'bmr.activity_sedentary',
     lightly_active:    'bmr.activity_lightly',
@@ -293,7 +312,7 @@ const MealEnginePage = {
       .filter(Boolean);
 
     const rowsHtml = items.map(item => {
-      const nameLabel = item.recipe_name || item.custom_name || '--';
+      const nameLabel = this._localizedRecipeName(item.recipe_name || item.custom_name || '--');
       const portion = item.portion_g != null ? `${item.portion_g} g` : '--';
       return `
         <div class="card saved-recipe-card" data-fixed-row="${item.id}">
@@ -957,8 +976,18 @@ MealEnginePage._sketchDishName = function(ingredients, mealType) {
 MealEnginePage._normalizePoolPayload = function(data, { namedWithLLM = false, source = 'named', defaultDishSource = 'generated' } = {}) {
   const breakfastSource = data.breakfast_dishes || data.breakfast_pool || [];
   const mainSource = data.main_dishes || data.main_pool || [];
-  const breakfastDishes = breakfastSource.map(dish => this._normalizePoolDish(dish, 'breakfast', defaultDishSource));
-  const mainDishes = mainSource.map(dish => this._normalizePoolDish(dish, 'main', defaultDishSource));
+  const requiresBreakfastPool = typeof data.requires_breakfast_pool === 'boolean'
+    ? data.requires_breakfast_pool
+    : Number(data.required_slot_counts?.breakfast ?? 0) > 0;
+  const requiresMainPool = typeof data.requires_main_pool === 'boolean'
+    ? data.requires_main_pool
+    : (Number(data.required_slot_counts?.lunch ?? 0) + Number(data.required_slot_counts?.dinner ?? 0)) > 0;
+  const breakfastDishes = requiresBreakfastPool
+    ? breakfastSource.map(dish => this._normalizePoolDish(dish, 'breakfast', defaultDishSource))
+    : [];
+  const mainDishes = requiresMainPool
+    ? mainSource.map(dish => this._normalizePoolDish(dish, 'main', defaultDishSource))
+    : [];
   const startDate = data.start_date || data.week_skeleton?.[0]?.date || '';
   const poolFingerprint = dishes => dishes.map(dish => [
     dish.dish_id,
@@ -981,12 +1010,8 @@ MealEnginePage._normalizePoolPayload = function(data, { namedWithLLM = false, so
     main_dishes: mainDishes,
     week_skeleton: Array.isArray(data.week_skeleton) ? data.week_skeleton.slice() : [],
     required_slot_counts: data.required_slot_counts || {},
-    requires_breakfast_pool: typeof data.requires_breakfast_pool === 'boolean'
-      ? data.requires_breakfast_pool
-      : Number(data.required_slot_counts?.breakfast ?? 0) > 0,
-    requires_main_pool: typeof data.requires_main_pool === 'boolean'
-      ? data.requires_main_pool
-      : (Number(data.required_slot_counts?.lunch ?? 0) + Number(data.required_slot_counts?.dinner ?? 0)) > 0,
+    requires_breakfast_pool: requiresBreakfastPool,
+    requires_main_pool: requiresMainPool,
     llm_quota: data.llm_quota || null,
     warnings: Array.isArray(data.warnings) ? data.warnings.slice() : [],
   };
@@ -1055,8 +1080,8 @@ MealEnginePage._buildPoolCarryover = function(poolData) {
       return copy;
     });
   const carryover = {
-    breakfast: buildGroup('breakfast', poolData.breakfast_dishes),
-    main: buildGroup('main', poolData.main_dishes),
+    breakfast: this._requiresBreakfastPool(poolData) ? buildGroup('breakfast', poolData.breakfast_dishes) : [],
+    main: this._requiresMainPool(poolData) ? buildGroup('main', poolData.main_dishes) : [],
   };
   return carryover.breakfast.length || carryover.main.length ? carryover : null;
 };
@@ -1083,8 +1108,12 @@ MealEnginePage._mergePoolCarryover = function(poolData) {
     return { dishes: [...kept, ...rest], count: kept.length, signatures: kept.map(dish => this._poolDishSignature(dish)) };
   };
 
-  const breakfast = mergeGroup('breakfast', poolData.breakfast_dishes);
-  const main = mergeGroup('main', poolData.main_dishes);
+  const breakfast = this._requiresBreakfastPool(poolData)
+    ? mergeGroup('breakfast', poolData.breakfast_dishes)
+    : { dishes: [], count: 0, signatures: [] };
+  const main = this._requiresMainPool(poolData)
+    ? mergeGroup('main', poolData.main_dishes)
+    : { dishes: [], count: 0, signatures: [] };
   const total = breakfast.count + main.count;
   if (!total) return poolData;
 
@@ -1174,8 +1203,12 @@ MealEnginePage._restorePoolSnapshot = async function(snapshotId, panel) {
   this._cache.pool_carryover = null;
   this._cache.pool_selection = {
     pool_tag: snapshot.selection?.pool_tag || snapshot.pool.pool_tag,
-    breakfast: new Set(snapshot.selection?.breakfast || snapshot.pool.breakfast_dishes.map(dish => dish.dish_id)),
-    main: new Set(snapshot.selection?.main || snapshot.pool.main_dishes.map(dish => dish.dish_id)),
+    breakfast: snapshot.pool.requires_breakfast_pool === false
+      ? new Set()
+      : new Set(snapshot.selection?.breakfast || snapshot.pool.breakfast_dishes.map(dish => dish.dish_id)),
+    main: snapshot.pool.requires_main_pool === false
+      ? new Set()
+      : new Set(snapshot.selection?.main || snapshot.pool.main_dishes.map(dish => dish.dish_id)),
   };
   this._cache.arranged_plan = snapshot.arranged_plan || null;
   this._cache.arrange_issue = null;
@@ -1198,10 +1231,14 @@ MealEnginePage._renderPoolHistory = function() {
   const t = k => I18n.t(k);
   const cards = history.map(item => {
     const pool = item.pool || {};
-    const breakfastCount = Array.isArray(item.selection?.breakfast)
+    const breakfastCount = pool.requires_breakfast_pool === false
+      ? 0
+      : Array.isArray(item.selection?.breakfast)
       ? item.selection.breakfast.length
       : (pool.breakfast_dishes || []).length;
-    const mainCount = Array.isArray(item.selection?.main)
+    const mainCount = pool.requires_main_pool === false
+      ? 0
+      : Array.isArray(item.selection?.main)
       ? item.selection.main.length
       : (pool.main_dishes || []).length;
     return `
@@ -1248,6 +1285,11 @@ MealEnginePage._ensureMealPlanPool = async function() {
 
   normalized = this._mergePoolCarryover(normalized);
   this._cache.meal_plan_pool = normalized;
+  // display-v2 wiring: the weekly menu overview shows the agent's stored
+  // week; hydrate it so the arranged section is populated on first render.
+  if (!this._cache.arranged_plan && typeof API.getStoredArrangedWeek === 'function') {
+    this._cache.arranged_plan = await API.getStoredArrangedWeek().catch(() => null);
+  }
   this._cache.arranged_plan = this._cache.arranged_plan || null;
   this._initPoolSelection(normalized);
   return normalized;
@@ -1339,7 +1381,9 @@ MealEnginePage._poolSourceLabel = function(dish) {
 
 MealEnginePage._poolSourceCounts = function(poolData) {
   const counts = { all: 0, generated: 0, library: 0, supplement: 0 };
-  [...(poolData.breakfast_dishes || []), ...(poolData.main_dishes || [])].forEach(dish => {
+  const breakfast = this._requiresBreakfastPool(poolData) ? (poolData.breakfast_dishes || []) : [];
+  const main = this._requiresMainPool(poolData) ? (poolData.main_dishes || []) : [];
+  [...breakfast, ...main].forEach(dish => {
     counts.all += 1;
     const key = this._poolSourceKey(dish);
     counts[key] = (counts[key] || 0) + 1;
@@ -1711,8 +1755,12 @@ MealEnginePage._mergeSupplementPool = function(response, poolData) {
     return { dishes: [...added, ...existing], added };
   };
 
-  const breakfast = mergeGroup('breakfast', current.breakfast_dishes, supplement.breakfast_dishes);
-  const main = mergeGroup('main', current.main_dishes, supplement.main_dishes);
+  const breakfast = this._requiresBreakfastPool(current)
+    ? mergeGroup('breakfast', current.breakfast_dishes, supplement.breakfast_dishes)
+    : { dishes: [], added: [] };
+  const main = this._requiresMainPool(current)
+    ? mergeGroup('main', current.main_dishes, supplement.main_dishes)
+    : { dishes: [], added: [] };
   const supplementSignatures = [...breakfast.added, ...main.added]
     .map(dish => this._poolDishSignature(dish))
     .filter(Boolean)
@@ -1720,8 +1768,8 @@ MealEnginePage._mergeSupplementPool = function(response, poolData) {
   const total = breakfast.added.length + main.added.length;
   const nextPoolTag = `${current.pool_tag}:supplement:${this._hashText(supplementSignatures || Date.now())}`;
 
-  const breakfastSelection = new Set(selection.breakfast || []);
-  const mainSelection = new Set(selection.main || []);
+  const breakfastSelection = this._requiresBreakfastPool(current) ? new Set(selection.breakfast || []) : new Set();
+  const mainSelection = this._requiresMainPool(current) ? new Set(selection.main || []) : new Set();
   breakfast.added.forEach(dish => breakfastSelection.add(dish.dish_id));
   main.added.forEach(dish => mainSelection.add(dish.dish_id));
 
@@ -2016,10 +2064,25 @@ MealEnginePage._renderMealPlanFromCache = async function(panel, poolData) {
     ? `<span class="pill ok">${t('plan.pool_carryover_summary').replace('{n}', carryoverCount)}</span>`
     : '';
   const sourceFiltersHtml = this._renderPoolSourceFilters(poolData);
-  const visibleBreakfastDishes = this._visiblePoolDishes(poolData.breakfast_dishes);
-  const visibleMainDishes = this._visiblePoolDishes(poolData.main_dishes);
+  const showBreakfastPool = this._requiresBreakfastPool(poolData);
+  const showMainPool = this._requiresMainPool(poolData);
+  const visibleBreakfastDishes = showBreakfastPool ? this._visiblePoolDishes(poolData.breakfast_dishes) : [];
+  const visibleMainDishes = showMainPool ? this._visiblePoolDishes(poolData.main_dishes) : [];
   const breakfastCards = visibleBreakfastDishes.map(dish => this._renderPoolDishCard(dish, 'breakfast')).join('');
   const mainCards = visibleMainDishes.map(dish => this._renderPoolDishCard(dish, 'main')).join('');
+  const breakfastSummaryPill = showBreakfastPool ? '<span class="pill ok" data-pool-breakfast-count></span>' : '';
+  const mainSummaryPill = showMainPool ? '<span class="pill ok" data-pool-main-count></span>' : '';
+  const breakfastSection = showBreakfastPool ? `
+    <div class="card">
+      <h4>${t('plan.pool_breakfast_section')}</h4>
+      <div class="muted">${t('plan.pool_default_selected')}</div>
+      <div class="pool-dish-grid">${breakfastCards || `<div class="muted">${t('plan.no_candidates')}</div>`}</div>
+    </div>` : '';
+  const mainSection = showMainPool ? `
+    <div class="card">
+      <h4>${t('plan.pool_main_section')}</h4>
+      <div class="pool-dish-grid">${mainCards || `<div class="muted">${t('plan.no_candidates')}</div>`}</div>
+    </div>` : '';
   const issueHtml = this._cache.arrange_issue
     ? this._renderArrangeIssue(this._cache.arrange_issue)
     : '';
@@ -2040,8 +2103,8 @@ MealEnginePage._renderMealPlanFromCache = async function(panel, poolData) {
         </div>
       </div>
       <div class="pool-selection-summary">
-        <span class="pill ok" data-pool-breakfast-count></span>
-        <span class="pill ok" data-pool-main-count></span>
+        ${breakfastSummaryPill}
+        ${mainSummaryPill}
         ${carryoverPill}
       </div>
       <div class="muted" data-pool-arrange-hint>${t('plan.pool_arrange_hint')}</div>
@@ -2050,15 +2113,8 @@ MealEnginePage._renderMealPlanFromCache = async function(panel, poolData) {
     ${warningsHtml}
     ${historyHtml}
     ${this._renderWeekSkeleton(poolData.week_skeleton)}
-    <div class="card">
-      <h4>${t('plan.pool_breakfast_section')}</h4>
-      <div class="muted">${t('plan.pool_default_selected')}</div>
-      <div class="pool-dish-grid">${breakfastCards || `<div class="muted">${t('plan.no_candidates')}</div>`}</div>
-    </div>
-    <div class="card">
-      <h4>${t('plan.pool_main_section')}</h4>
-      <div class="pool-dish-grid">${mainCards || `<div class="muted">${t('plan.no_candidates')}</div>`}</div>
-    </div>
+    ${breakfastSection}
+    ${mainSection}
     <div class="card">
       <div class="flex-row">
         <div>
@@ -2111,8 +2167,12 @@ MealEnginePage._renderMealPlanFromCache = async function(panel, poolData) {
   });
 
   document.getElementById('mp-arrange')?.addEventListener('click', async () => {
-    const breakfast = this._selectedDishes('breakfast', poolData.breakfast_dishes);
-    const main = this._selectedDishes('main', poolData.main_dishes);
+    const breakfast = this._requiresBreakfastPool(poolData)
+      ? this._selectedDishes('breakfast', poolData.breakfast_dishes)
+      : [];
+    const main = this._requiresMainPool(poolData)
+      ? this._selectedDishes('main', poolData.main_dishes)
+      : [];
     const breakfastMissing = this._requiresBreakfastPool(poolData) && !breakfast.length;
     const mainMissing = this._requiresMainPool(poolData) && !main.length;
     if (breakfastMissing || mainMissing) {

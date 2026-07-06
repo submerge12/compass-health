@@ -1,0 +1,51 @@
+.textarea {
+  height: 220rpx;
+}
+
+.page-diet {
+  background: linear-gradient(180deg, #fff7ef 0%, #f5f8fb 44%);
+}
+
+.ingredient-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14rpx;
+}
+
+.ingredient-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180rpx;
+  gap: 10rpx;
+  align-items: center;
+}
+
+.ingredient-row.can-remove {
+  grid-template-columns: minmax(0, 1fr) 180rpx 72rpx;
+}
+
+.ingredient-name,
+.ingredient-grams {
+  min-height: 72rpx;
+  font-size: 26rpx;
+}
+
+.gram-field {
+  position: relative;
+}
+
+.ingredient-grams {
+  padding-right: 44rpx;
+}
+
+.gram-unit {
+  position: absolute;
+  right: 18rpx;
+  top: 18rpx;
+  color: #66736f;
+  font-size: 24rpx;
+}
+
+.ingredient-remove {
+  min-width: 0;
+  padding: 0;
+}

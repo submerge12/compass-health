@@ -1,0 +1,109 @@
+<view class="page page-settings stack">
+  <view class="header">
+    <view class="eyebrow">设置</view>
+    <view class="title">资料与偏好</view>
+    <view class="subtitle">身体档案和食材偏好会直接影响配餐结果。</view>
+  </view>
+
+  <view wx:if="{{error}}" class="card error">{{error}}</view>
+
+  <view class="card stack soft-panel">
+    <view class="card-title">连接</view>
+    <view class="field">
+      <view class="label">API 地址</view>
+      <input class="input" value="{{apiBase}}" placeholder="http://127.0.0.1:8000" bindinput="onApiBaseInput" />
+    </view>
+    <button class="button button-ghost" bindtap="saveApiBase">保存 API 地址</button>
+  </view>
+
+  <view class="card stack">
+    <view class="card-title">身体档案</view>
+    <view class="grid-2">
+      <view class="field">
+        <view class="label">年龄</view>
+        <input class="input" type="number" value="{{bmr.age}}" data-key="age" bindinput="onBmrInput" />
+      </view>
+      <view class="field">
+        <view class="label">性别</view>
+        <picker range="{{genderOptions}}" range-key="label" value="{{genderIndex}}" bindchange="onGenderChange">
+          <view class="picker row">
+            <text>{{genderOptions[genderIndex].label}}</text>
+            <text class="muted">选择</text>
+          </view>
+        </picker>
+      </view>
+      <view class="field">
+        <view class="label">身高 cm</view>
+        <input class="input" type="digit" value="{{bmr.height_cm}}" data-key="height_cm" bindinput="onBmrInput" />
+      </view>
+      <view class="field">
+        <view class="label">体重 kg</view>
+        <input class="input" type="digit" value="{{bmr.weight_kg}}" data-key="weight_kg" bindinput="onBmrInput" />
+      </view>
+    </view>
+    <view class="field">
+      <view class="label">目标</view>
+      <picker range="{{goalOptions}}" range-key="label" value="{{goalIndex}}" bindchange="onGoalChange">
+        <view class="picker row">
+          <text>{{goalOptions[goalIndex].label}}</text>
+          <text class="muted">选择</text>
+        </view>
+      </picker>
+    </view>
+    <view class="field">
+      <view class="label">日常活动</view>
+      <picker range="{{activityOptions}}" range-key="label" value="{{activityIndex}}" bindchange="onActivityChange">
+        <view class="picker row">
+          <text>{{activityOptions[activityIndex].label}}</text>
+          <text class="muted">选择</text>
+        </view>
+      </picker>
+    </view>
+    <button class="button button-primary" loading="{{savingBmr}}" disabled="{{savingBmr}}" bindtap="saveBmr">保存身体档案</button>
+  </view>
+
+  <view class="card stack">
+    <view class="card-title">通用设置</view>
+    <view class="grid-2">
+      <view class="field">
+        <view class="label">饮水目标 ml</view>
+        <input class="input" type="number" value="{{settings.daily_water_goal_ml}}" data-key="daily_water_goal_ml" bindinput="onSettingsInput" />
+      </view>
+      <view class="field">
+        <view class="label">提醒间隔 min</view>
+        <input class="input" type="number" value="{{settings.water_reminder_min}}" data-key="water_reminder_min" bindinput="onSettingsInput" />
+      </view>
+    </view>
+    <button class="button button-ghost" loading="{{savingSettings}}" disabled="{{savingSettings}}" bindtap="saveSettings">保存通用设置</button>
+  </view>
+
+  <view class="card stack">
+    <view class="row">
+      <view>
+        <view class="card-title">食材偏好</view>
+        <view class="muted">尽量覆盖主食、蛋白、蔬菜、乳制品或豆制品。</view>
+      </view>
+      <button class="button button-small button-primary" loading="{{savingPrefs}}" disabled="{{savingPrefs}}" bindtap="savePreferences">保存</button>
+    </view>
+
+    <view wx:if="{{!prefCategories.length}}" class="empty">正在加载食材。</view>
+    <view class="stack" wx:else>
+      <view class="pref-section" wx:for="{{prefCategories}}" wx:key="key" wx:for-index="catIndex">
+        <view class="label">{{item.label}}</view>
+        <view class="chip-wrap">
+          <view class="chip {{food.selected ? 'selected' : ''}}" wx:for="{{item.items}}" wx:for-item="food" wx:key="key" wx:for-index="foodIndex" data-cat-index="{{catIndex}}" data-food-index="{{foodIndex}}" bindtap="togglePreference">
+            {{food.label}}
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view class="card stack">
+    <view>
+      <view class="card-title">{{user.username || '账号'}}</view>
+      <view class="muted">{{user.email || ''}}</view>
+    </view>
+    <button class="button button-danger" bindtap="logout">退出登录</button>
+  </view>
+</view>

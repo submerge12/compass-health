@@ -1,0 +1,46 @@
+.bar-fill {
+  transition: width 0.2s ease;
+}
+
+.hero-card {
+  margin-bottom: 6rpx;
+}
+
+.quick-card {
+  gap: 24rpx;
+}
+
+.quick-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14rpx;
+  padding-top: 20rpx;
+  border-top: 1rpx solid #edf2f0;
+}
+
+.quick-section:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.quick-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12rpx;
+}
+
+.inline-form {
+  display: grid;
+  grid-template-columns: 1fr 150rpx;
+  gap: 12rpx;
+  align-items: center;
+}
+
+.compact-input {
+  min-height: 64rpx;
+  font-size: 26rpx;
+}
+
+.water-fill {
+  background: linear-gradient(90deg, #41b6e6 0%, #2f8fc3 100%);
+}

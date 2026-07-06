@@ -35,3 +35,6 @@ CLAUDE.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# WeChat devtools personal config
+miniprogram/project.private.config.json

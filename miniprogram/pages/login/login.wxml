@@ -1,0 +1,39 @@
+<view class="page login-page">
+  <view class="login-visual">
+    <image class="login-hero-image" src="/assets/wellness-hero.jpg" mode="aspectFill" />
+  </view>
+
+  <view class="header">
+    <view class="eyebrow">Compass Health</view>
+    <view class="title">{{mode === 'login' ? '欢迎回来' : '创建账号'}}</view>
+    <view class="subtitle">先连到你的 FastAPI 后端，再进入小程序测试版。</view>
+  </view>
+
+  <view class="card stack login-card">
+    <view class="segmented">
+      <view class="segment {{mode === 'login' ? 'active' : ''}}" data-mode="login" bindtap="switchMode">登录</view>
+      <view class="segment {{mode === 'register' ? 'active' : ''}}" data-mode="register" bindtap="switchMode">注册</view>
+    </view>
+
+    <view class="field">
+      <view class="label">API 地址</view>
+      <input class="input" value="{{apiBase}}" placeholder="http://127.0.0.1:8000" bindinput="onApiBaseInput" />
+    </view>
+
+    <view class="field">
+      <view class="label">用户名</view>
+      <input class="input" value="{{username}}" placeholder="至少 3 个字符" bindinput="onUsernameInput" />
+    </view>
+
+    <view class="field">
+      <view class="label">密码</view>
+      <input class="input" value="{{password}}" password placeholder="至少 6 个字符" bindinput="onPasswordInput" />
+    </view>
+
+    <view wx:if="{{error}}" class="error">{{error}}</view>
+
+    <button class="button button-primary" loading="{{loading}}" disabled="{{loading}}" bindtap="submit">
+      {{mode === 'login' ? '登录' : '注册并登录'}}
+    </button>
+  </view>
+</view>

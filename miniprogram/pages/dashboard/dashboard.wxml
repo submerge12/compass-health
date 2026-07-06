@@ -1,0 +1,112 @@
+<view class="page stack">
+  <view class="hero-card">
+    <view class="hero-copy">
+      <view class="hero-title">健康计划，今天就能看见</view>
+      <view class="hero-subtitle">饮食、饮水、运动和配餐集中在一个清爽入口。</view>
+    </view>
+    <image class="hero-image" src="/assets/wellness-hero.jpg" mode="aspectFill" />
+  </view>
+
+  <view class="header">
+    <view class="eyebrow">今日</view>
+    <view class="title">你好，{{user.username || 'Compass'}}</view>
+    <view class="subtitle">{{user.checked_in_today ? '今天已打卡' : '今天还没有打卡'}} · 连续 {{user.checkin_streak || 0}} 天</view>
+  </view>
+
+  <view wx:if="{{error}}" class="card error">{{error}}</view>
+
+  <view class="grid-2">
+    <view class="metric metric-diet">
+      <view class="metric-value">{{diet.totals.calories || 0}}</view>
+      <view class="metric-label">已摄入 kcal</view>
+    </view>
+    <view class="metric metric-food">
+      <view class="metric-value">{{diet.remaining_calories || 0}}</view>
+      <view class="metric-label">剩余 kcal</view>
+    </view>
+    <view class="metric metric-water">
+      <view class="metric-value">{{water.total_ml || 0}}</view>
+      <view class="metric-label">饮水 ml</view>
+    </view>
+    <view class="metric metric-activity">
+      <view class="metric-value">{{exercise.total_calories || 0}}</view>
+      <view class="metric-label">运动 kcal</view>
+    </view>
+  </view>
+
+  <view class="card stack soft-panel">
+    <view class="row">
+      <view>
+        <view class="card-title">热量目标</view>
+        <view class="muted">{{diet.calorie_target || 0}} kcal / 天</view>
+      </view>
+      <view class="tag">{{diet.tdee || 0}} TDEE</view>
+    </view>
+    <view class="bar">
+      <view class="bar-fill" style="width: {{dietPct}}%;"></view>
+    </view>
+  </view>
+
+  <view class="card stack quick-card">
+    <view>
+      <view class="card-title">快速记录</view>
+      <view class="muted">常用动作放在首页，少点几下。</view>
+    </view>
+
+    <view class="quick-section">
+      <view class="row">
+        <view>
+          <view class="label">饮水</view>
+          <view class="muted">{{water.total_ml || 0}} / {{water.goal_ml || 2000}} ml</view>
+        </view>
+        <view class="tag accent-blue">{{waterPct}}%</view>
+      </view>
+      <view class="bar">
+        <view class="bar-fill water-fill" style="width: {{waterPct}}%;"></view>
+      </view>
+      <view class="quick-buttons">
+        <button class="button button-small button-ghost" loading="{{waterSaving}}" disabled="{{waterSaving}}" data-amount="250" bindtap="logWater">+250</button>
+        <button class="button button-small button-ghost" loading="{{waterSaving}}" disabled="{{waterSaving}}" data-amount="500" bindtap="logWater">+500</button>
+        <button class="button button-small button-ghost" loading="{{waterSaving}}" disabled="{{waterSaving}}" data-amount="750" bindtap="logWater">+750</button>
+      </view>
+      <view class="inline-form">
+        <input class="input compact-input" type="number" value="{{customWater}}" placeholder="自定义 ml" bindinput="onCustomWaterInput" />
+        <button class="button button-small button-primary" loading="{{waterSaving}}" disabled="{{waterSaving}}" bindtap="logCustomWater">记录</button>
+      </view>
+    </view>
+
+    <view class="quick-section">
+      <view class="row">
+        <view>
+          <view class="label">当天体重</view>
+          <view class="muted">{{weightSummary}}</view>
+        </view>
+        <view class="tag accent-violet">kg</view>
+      </view>
+      <view class="inline-form">
+        <input class="input compact-input" type="digit" value="{{weightInput}}" placeholder="例如 62.5" bindinput="onWeightInput" />
+        <button class="button button-small button-secondary" loading="{{weightSaving}}" disabled="{{weightSaving}}" bindtap="saveWeight">保存</button>
+      </view>
+    </view>
+  </view>
+
+  <view class="card stack">
+    <view class="row">
+      <view>
+        <view class="card-title">今天的记录</view>
+        <view class="muted">饮食 {{diet.logs.length || 0}} 条 · 饮水 {{water.logs.length || 0}} 条 · 运动 {{exercise.logs.length || 0}} 条</view>
+      </view>
+      <button class="button button-small button-primary" loading="{{checkingIn}}" disabled="{{checkingIn || user.checked_in_today}}" bindtap="checkIn">
+        {{user.checked_in_today ? '已打卡' : '打卡'}}
+      </button>
+    </view>
+  </view>
+
+  <view wx:if="{{!user.has_bmr_profile}}" class="card stack">
+    <view>
+      <view class="card-title">补全身体档案</view>
+      <view class="muted">配餐和目标热量需要身高、体重、目标等基础信息。</view>
+    </view>
+    <button class="button button-secondary" bindtap="openSettings">去设置</button>
+  </view>
+</view>

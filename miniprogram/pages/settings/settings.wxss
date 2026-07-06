@@ -1,0 +1,9 @@
+.pref-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+
+.page-settings {
+  background: linear-gradient(180deg, #eef6ff 0%, #f5f8fb 42%);
+}

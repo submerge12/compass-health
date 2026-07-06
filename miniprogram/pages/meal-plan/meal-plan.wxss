@@ -1,0 +1,14 @@
+.dish {
+  border: 1rpx solid #edf2f0;
+  border-radius: 8rpx;
+  padding: 18rpx;
+}
+
+.dish.selected {
+  border-color: #167c70;
+  background: #f2faf7;
+}
+
+.page-meal-plan {
+  background: linear-gradient(180deg, #ecf8f4 0%, #f5f8fb 46%);
+}

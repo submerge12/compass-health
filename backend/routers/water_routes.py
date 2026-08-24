@@ -9,6 +9,7 @@ from sqlalchemy import func
 
 import models
 from auth import get_current_user
+from services.legacy_write_gate import reject_legacy_write
 from database import get_db
 from services import local_dates
 from services.local_dates import date_or_422
@@ -28,6 +29,7 @@ def log_water(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    reject_legacy_write()
     if body.amount_ml <= 0:
         raise HTTPException(status_code=422, detail="amount_ml must be positive")
     date = date_or_422(body.date)
@@ -66,6 +68,7 @@ def delete_water_log(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    reject_legacy_write()
     entry = db.query(models.WaterLog).filter(
         models.WaterLog.id == log_id, models.WaterLog.user_id == current_user.id
     ).first()

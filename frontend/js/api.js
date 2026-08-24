@@ -231,15 +231,11 @@ const API = {
      Water endpoints
      鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
   async logWater(amount_ml) {
-    return this._request('POST', '/api/water/log', { amount_ml });
-  },
-
-  async deleteWaterLog(id) {
-    return this._request('DELETE', `/api/water/log/${id}`);
+    return this._agentRequest('POST', '/api/v1/water/logs', { amount_ml });
   },
 
   async getWaterToday() {
-    return this._request('GET', '/api/water/today');
+    return this._agentRequest('GET', '/api/v1/water/today');
   },
 
   async getWaterHistory(days = 7) {
@@ -250,15 +246,13 @@ const API = {
      Exercise endpoints
      鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
   async logExercise(data) {
-    return this._request('POST', '/api/exercise/log', data);
-  },
-
-  async deleteExerciseLog(id) {
-    return this._request('DELETE', `/api/exercise/log/${id}`);
+    // Legacy payloads: {activity_type|exercise_type, duration_minutes, calories_burned, notes}
+    return this._agentRequest('POST', '/api/v1/activities', data);
   },
 
   async getExerciseToday() {
-    return this._request('GET', '/api/exercise/today');
+    const data = await this._agentRequest('GET', '/api/v1/activities');
+    return { logs: data.logs, total_minutes: data.total_minutes, total_calories: data.total_calories };
   },
 
   async getExerciseHistory(days = 7) {
@@ -273,7 +267,47 @@ const API = {
   },
 
   async logDietIngredients(data) {
-    return this._request('POST', '/api/diet/log-ingredients', data);
+    // WO-HS-04: canonical path — estimate server-side, commit as a fact with
+    // idempotency key so retries never duplicate.
+    const description = String(data?.description || data?.food_description || '').trim();
+    if (!description) {
+      const items = Array.isArray(data?.ingredients) ? data.ingredients : [];
+      const joined = items.map((i) => `${i.name_zh || i.slug || ''} ${i.grams ?? ''}克`).join(' + ').trim();
+      if (!joined) throw new Error('缺少食物描述');
+      return this._commitDietDescription(joined, data?.meal_type);
+    }
+    return this._commitDietDescription(description, data?.meal_type);
+  },
+
+  async _commitDietDescription(description, mealType) {
+    const idempotencyKey = `ui-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    try {
+      const result = await this._agentRequest('POST', '/api/v1/diet/logs:commit', {
+        date: new Date().toISOString().slice(0, 10),
+        mealType: mealType || 'lunch',
+        description,
+        idempotencyKey,
+      });
+      if (result.status === 'needs_confirmation') {
+        const err = new Error('部分食物无法识别，请在确认后保存');
+        err.status = 422;
+        err.needsConfirmation = result.details?.needsConfirmation || [];
+        err.unmatched = result.details?.unmatched || [];
+        throw err;
+      }
+      return { id: result.log.id, kcal: result.log.caloriesKcal, description };
+    } catch (err) {
+      if (err.status === 409) { // state conflict: retry once without revision pinning
+        const retry = await this._agentRequest('POST', '/api/v1/diet/logs:commit', {
+          date: new Date().toISOString().slice(0, 10),
+          mealType: mealType || 'lunch',
+          description,
+          idempotencyKey,
+        });
+        if (retry.log) return { id: retry.log.id, kcal: retry.log.caloriesKcal, description };
+      }
+      throw err;
+    }
   },
 
   async deleteDietLog(id) {
@@ -296,6 +330,11 @@ const API = {
      Condition endpoints
      鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
   async logCondition(data) {
+    // WO-HS-04: weight goes to the canonical body route; sleep/mood notes are
+    // recorded as observations once M20 pain-command lands (kept on legacy for now).
+    if (data?.weight_kg !== undefined && data?.weight_kg !== null && data?.weight_kg !== '') {
+      return this._agentRequest('POST', '/api/v1/body/condition', { weight_kg: Number(data.weight_kg) });
+    }
     return this._request('POST', '/api/condition/log', data);
   },
 

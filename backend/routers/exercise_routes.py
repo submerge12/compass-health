@@ -9,6 +9,7 @@ from sqlalchemy import func
 
 import models
 from auth import get_current_user
+from services.legacy_write_gate import reject_legacy_write
 from database import get_db
 from services import local_dates
 from services.local_dates import date_or_422
@@ -31,6 +32,7 @@ def log_exercise(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    reject_legacy_write()
     date = date_or_422(body.date)
     entry = models.ExerciseLog(
         user_id=current_user.id,
@@ -65,6 +67,7 @@ def delete_exercise_log(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    reject_legacy_write()
     entry = db.query(models.ExerciseLog).filter(
         models.ExerciseLog.id == log_id, models.ExerciseLog.user_id == current_user.id
     ).first()

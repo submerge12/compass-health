@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 import models
 from auth import get_current_user
+from services.legacy_write_gate import reject_legacy_write
 from database import get_db
 from services import calorie, deepseek, llm_quota, local_dates, planning_context as pc
 from services.local_dates import date_or_422
@@ -258,6 +259,7 @@ def log_diet(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    reject_legacy_write()
     if body.meal_type not in {"breakfast", "lunch", "dinner", "snack"}:
         raise HTTPException(status_code=422, detail="Invalid meal_type")
     date = date_or_422(body.date)
@@ -300,6 +302,7 @@ def log_diet_ingredients(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    reject_legacy_write()
     """
     Log a meal by raw ingredient list.
     DeepSeek estimates nutrition values and stores them in DietLog.
@@ -391,6 +394,7 @@ def reanalyze_diet_log(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    reject_legacy_write()
     entry = db.query(models.DietLog).filter(
         models.DietLog.id == log_id,
         models.DietLog.user_id == current_user.id
@@ -458,6 +462,7 @@ def delete_diet_log(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    reject_legacy_write()
     entry = db.query(models.DietLog).filter(
         models.DietLog.id == log_id,
         models.DietLog.user_id == current_user.id

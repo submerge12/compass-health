@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 import models
 from auth import get_current_user
+from services.legacy_write_gate import reject_legacy_write
 from database import get_db
 from services import local_dates, weight_tracking
 from services.local_dates import date_or_422
@@ -114,6 +115,7 @@ def log_condition(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    reject_legacy_write()
     date = date_or_422(body.date)
     present_fields = _present_fields(body)
 

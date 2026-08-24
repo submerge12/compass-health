@@ -24,6 +24,7 @@ const App = {
     // view (#view-admin) and is handled by AdminPortal, not this registry.
     this._pages = {
       dashboard: typeof DashboardPage !== 'undefined' ? DashboardPage : null,
+        voice: typeof VoicePage !== 'undefined' ? VoicePage : null,
       water:     typeof WaterPage     !== 'undefined' ? WaterPage     : null,
       exercise:  typeof ExercisePage  !== 'undefined' ? ExercisePage  : null,
       diet:      typeof DietPage      !== 'undefined' ? DietPage      : null,

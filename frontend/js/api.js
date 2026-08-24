@@ -1126,3 +1126,67 @@ API.getRecipe = function(recipeId) {
   }
   return this._origGetRecipe(recipeId);
 };
+
+/* ============================================================
+   M09/P6 voice API — all calls go through the authenticated BFF.
+   Audio is POSTed to FastAPI and never persisted server-side.
+   ============================================================ */
+
+API.voiceTranscribe = async function(audioBlob, language = 'zh') {
+  const context = _buildRequestContext('POST', '/api/voice/transcribe');
+  const form = new FormData();
+  form.append('audio', audioBlob, 'speech.wav');
+  form.append('language', language);
+  const token = localStorage.getItem('ch_access_token');
+  const res = await fetch(`${API_BASE}/api/voice/transcribe`, {
+    method: 'POST',
+    headers: { ...((token) ? { 'Authorization': `Bearer ${token}` } : {}), ...(({ 'X-Request-ID': context.requestId, 'X-Journey-ID': context.journeyId })) },
+    body: form,
+  });
+  if (res.status === 401 && await this._tryRefresh()) {
+    return API.voiceTranscribe(audioBlob, language);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail?.message || data.detail || `HTTP ${res.status}`);
+  return data;
+};
+
+API.voiceTranscribeText = async function(transcript) {
+  const token = localStorage.getItem('ch_access_token');
+  const res = await fetch(`${API_BASE}/api/voice/transcribe:text`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      ...((token) ? { 'Authorization': `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ transcript }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+  return data;
+};
+
+API.voiceCommit = async function(transcript, opts = {}) {
+  const token = localStorage.getItem('ch_access_token');
+  const res = await fetch(`${API_BASE}/api/voice/commit`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      ...((token) ? { 'Authorization': `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({
+      transcript,
+      date: opts.date || null,
+      confirmed: !!opts.confirmed,
+      idempotency_key: opts.idempotencyKey || '',
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail?.message || data.detail || `HTTP ${res.status}`);
+  return data;
+};
+
+/* M03 daily state via the BFF (read model + freshness). */
+API.getDailyState = async function(date) {
+  return this._agentRequest('GET', `/api/v1/daily-state?date=${encodeURIComponent(date)}`);
+};

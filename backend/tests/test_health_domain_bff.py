@@ -187,3 +187,32 @@ def test_bff_disabled_mode_returns_503(bff_client, captured, monkeypatch, clean_
     assert res.status_code == 503
     assert res.json()["error"] == "domain_unavailable"
     assert captured["requests"] == []
+
+
+def test_bff_proxies_v1_daily_state_paths(bff_client, captured, clean_db):
+    """M03: the same authenticated proxy serves the new /api/v1/* routes."""
+    bff_client["attach"](_mock_transport(captured))
+    auth = register(bff_client["client"], "bff-v1")
+
+    res = bff_client["client"].get(
+        "/api/domain/v1/daily-state?date=2026-08-24",
+        headers={"Authorization": f"Bearer {auth['access_token']}"},
+    )
+    assert res.status_code == 200
+    downstream = captured["requests"][0]
+    assert downstream["path"] == "/api/v1/daily-state"
+    assert downstream["query"]["date"] == "2026-08-24"
+
+    captured["requests"].clear()
+    res = bff_client["client"].post(
+        "/api/domain/v1/observations",
+        headers={"Authorization": f"Bearer {auth['access_token']}"},
+        json={"observedOn": "2026-08-24", "kind": "sleep", "value": {"hours": 6.5}},
+    )
+    assert res.status_code == 200
+    downstream = captured["requests"][0]
+    assert downstream["path"] == "/api/v1/observations"
+    import json as _json
+
+    sent = _json.loads(downstream["body"].decode("utf-8"))
+    assert sent["kind"] == "sleep"

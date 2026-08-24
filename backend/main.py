@@ -21,7 +21,7 @@ from routers import (
     recipe_routes, meal_plan_routes, admin_routes,
     daily_activity_routes, preferences_routes,
     meal_engine_routes, fixed_meal_routes, assistant_routes,
-    health_domain_routes,
+    health_domain_routes, voice_routes,
 )
 from services import autofill
 import models
@@ -111,6 +111,7 @@ app.include_router(meal_engine_routes.router)
 app.include_router(fixed_meal_routes.router)
 app.include_router(assistant_routes.router)
 app.include_router(health_domain_routes.router)
+app.include_router(voice_routes.router)
 
 
 # ── Built-in recipe seed data (mirrors DIET_RECIPES in diet.js) ───────────────

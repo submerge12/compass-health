@@ -66,6 +66,17 @@ $pgReady = docker exec compass-health-pg pg_isready -U compass -d compass_health
 if ($LASTEXITCODE -ne 0) { throw "PostgreSQL not ready: $pgReady" }
 Write-Host "[OK] PostgreSQL ready (:5433)" -ForegroundColor Green
 
+# -- 1b. Schema migration gate (WO-HS-01 / M16) ------------------------------
+# Migrations run before any service starts; a failed migration aborts the
+# whole startup instead of booting APIs against an incompatible schema.
+Push-Location $AgentDir
+$env:DATABASE_URL = $DatabaseUrl
+node --import tsx src/db/migrate.ts
+$migrateExit = $LASTEXITCODE
+Pop-Location
+if ($migrateExit -ne 0) { throw "Schema migration gate failed - fix migrations before starting services." }
+Write-Host "[OK] Schema migrations + compatibility gate passed" -ForegroundColor Green
+
 # -- 2. Health Domain API ---------------------------------------------------
 $domainUp = $false
 try { $domainUp = (Invoke-WebRequest -Uri "$DomainUrl/api/health" -TimeoutSec 2 -UseBasicParsing).StatusCode -eq 200 } catch {}

@@ -21,6 +21,7 @@ from routers import (
     recipe_routes, meal_plan_routes, admin_routes,
     daily_activity_routes, preferences_routes,
     meal_engine_routes, fixed_meal_routes, assistant_routes,
+    health_domain_routes,
 )
 from services import autofill
 import models
@@ -87,6 +88,13 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
+@app.get("/healthz", tags=["ops"])
+async def healthz():
+    """Liveness only — no auth, no data. Readiness of the health domain is
+    probed separately via /api/domain/health (M15: live vs ready)."""
+    return {"ok": True, "service": "compass-health-bff"}
+
+
 app.include_router(auth_routes.router)
 app.include_router(user_routes.router)
 app.include_router(water_routes.router)
@@ -102,6 +110,7 @@ app.include_router(preferences_routes.router)
 app.include_router(meal_engine_routes.router)
 app.include_router(fixed_meal_routes.router)
 app.include_router(assistant_routes.router)
+app.include_router(health_domain_routes.router)
 
 
 # ── Built-in recipe seed data (mirrors DIET_RECIPES in diet.js) ───────────────

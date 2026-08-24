@@ -636,31 +636,54 @@ API._tryRefresh = async function(parentContext = null) {
 /* ============================================================
    display-v2 wiring — agent-backed meal engine
    The functions below override their FastAPI versions and read
-   from the compass-health-agent display API instead
-   (`pnpm serve:display`, default http://127.0.0.1:8788).
+   from the health domain through the FastAPI BFF (default) or the
+   agent display API directly (dev fallback, ch_display_api_mode).
    Everything not overridden here still uses API_BASE.
    Contract: compass-health-agent/docs/display-interface-plan.md
    ============================================================ */
 
 const AGENT_API_BASE = localStorage.getItem('ch_display_api') || 'http://127.0.0.1:8788';
+// M01: the browser reaches the health domain through the authenticated
+// FastAPI BFF (/api/domain/*) — direct calls to the Display API bypassed
+// JWT user isolation and cross-service tracing. 'direct' remains only as a
+// developer fallback (set ch_display_api_mode in localStorage).
+const AGENT_API_MODE = localStorage.getItem('ch_display_api_mode') || 'bff';
 
 API._agentRequest = async function(method, path, body = null) {
+  const context = _buildRequestContext(method, path);
+  let headers = { 'Content-Type': 'application/json' };
+  let url;
+  if (AGENT_API_MODE === 'bff') {
+    // '/api/plan?start=…' → '${API_BASE}/api/domain/plan?start=…'
+    url = `${API_BASE}${path.replace(/^\/api\//, '/api/domain/')}`;
+    const token = localStorage.getItem('ch_access_token');
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+  } else {
+    url = `${AGENT_API_BASE}${path}`;
+  }
+  headers = _withTracingHeaders(headers, context);
+
   let res;
   try {
-    res = await fetch(`${AGENT_API_BASE}${path}`, {
+    res = await fetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: body === null ? undefined : JSON.stringify(body),
     });
   } catch (err) {
     throw new Error(I18n.lang === 'zh'
-      ? '无法连接营养引擎显示服务 — 请在 compass-health-agent 目录运行 pnpm serve:display'
-      : 'Cannot reach the agent display API — run `pnpm serve:display` in compass-health-agent');
+      ? (AGENT_API_MODE === 'bff'
+          ? '无法连接健康服务（经 FastAPI BFF）— 请确认 backend 与健康领域服务已启动'
+          : '无法连接营养引擎显示服务 — 请在 compass-health-agent 目录运行 pnpm serve:display')
+      : (AGENT_API_MODE === 'bff'
+          ? 'Cannot reach the health domain via the FastAPI BFF — check backend and domain service'
+          : 'Cannot reach the agent display API — run `pnpm serve:display` in compass-health-agent'));
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.error || `HTTP ${res.status}`);
+    const err = new Error(data.error || data.detail || `HTTP ${res.status}`);
     err.status = res.status;
+    err.requestId = data.request_id || context.requestId;
     throw err;
   }
   return data;

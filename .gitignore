@@ -38,3 +38,6 @@ Thumbs.db
 
 # WeChat devtools personal config
 miniprogram/project.private.config.json
+
+# Local virtualenv (P0 baseline setup)
+.venv/

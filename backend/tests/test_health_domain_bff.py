@@ -216,3 +216,46 @@ def test_bff_proxies_v1_daily_state_paths(bff_client, captured, clean_db):
 
     sent = _json.loads(downstream["body"].decode("utf-8"))
     assert sent["kind"] == "sleep"
+
+
+def test_bff_proxies_diet_v2_commands(bff_client, captured, clean_db):
+    """M05: preview/commit/correct flow through the same authenticated proxy."""
+    bff_client["attach"](_mock_transport(captured))
+    auth = register(bff_client["client"], "bff-diet-v2")
+
+    res = bff_client["client"].post(
+        "/api/domain/v1/diet/logs:preview",
+        headers={"Authorization": f"Bearer {auth['access_token']}"},
+        json={"description": "牛肉150克", "date": "2026-08-24", "mealType": "lunch"},
+    )
+    assert res.status_code == 200
+    downstream = captured["requests"][0]
+    assert downstream["path"] == "/api/v1/diet/logs:preview"
+
+    captured["requests"].clear()
+    res = bff_client["client"].post(
+        "/api/domain/v1/diet/logs:commit",
+        headers={
+            "Authorization": f"Bearer {auth['access_token']}",
+            "X-Request-ID": "req-diet-commit-1",
+        },
+        json={
+            "description": "牛肉150克",
+            "date": "2026-08-24",
+            "mealType": "lunch",
+            "idempotencyKey": "bff-j01-key-1",
+        },
+    )
+    assert res.status_code == 200
+    downstream = captured["requests"][0]
+    assert downstream["path"] == "/api/v1/diet/logs:commit"
+    assert downstream["headers"]["x-request-id"] == "req-diet-commit-1"
+
+    captured["requests"].clear()
+    res = bff_client["client"].post(
+        "/api/domain/v1/diet/logs:correct",
+        headers={"Authorization": f"Bearer {auth['access_token']}"},
+        json={"originalLogId": "some-uuid", "description": "牛肉200克"},
+    )
+    assert res.status_code == 200
+    assert captured["requests"][0]["path"] == "/api/v1/diet/logs:correct"

@@ -56,11 +56,15 @@ class HealthDomainClient:
         external_user_id: str,
         params: Optional[dict[str, Any]] = None,
         json_body: Optional[Any] = None,
+        actor: str = "web",
     ) -> httpx.Response:
         headers = {
             "X-External-User-ID": external_user_id,
             "X-Request-ID": request_id_var.get() or "",
             "X-Journey-ID": journey_id_var.get() or "",
+            # WO-HS-02: caller class for receipts; derived from the route, not
+            # the browser.
+            "X-Actor": actor,
         }
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"

@@ -1,11 +1,10 @@
-"""WO-HS-04 / M02: legacy health write gate.
+"""WO-HS-04 / M02, P0-8: legacy health write gate.
 
 ``HEALTH_LEGACY_WRITE_MODE`` controls the old FastAPI health write routes:
 
-- ``enabled`` (default during migration): routes behave as before;
+- ``enabled``: routes behave as before — opt-in escape hatch only;
 - ``readonly``: writes return 410 with a machine-readable code;
-- ``disabled``: same as readonly (kept as separate name for future hard-off
-  semantics like hiding routes).
+- ``disabled`` (production default): same as readonly.
 
 Reads are never blocked — the archive stays queryable (plan §七.3).
 """
@@ -17,7 +16,7 @@ from fastapi import HTTPException, status
 
 
 def legacy_write_mode() -> str:
-    return os.environ.get("HEALTH_LEGACY_WRITE_MODE", "enabled").strip().lower()
+    return os.environ.get("HEALTH_LEGACY_WRITE_MODE", "disabled").strip().lower()
 
 
 def reject_legacy_write() -> None:

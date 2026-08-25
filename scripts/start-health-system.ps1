@@ -103,7 +103,9 @@ if (-not $bffUp) {
         Write-Host "[..] backend/.env has no SECRET_KEY; using a dev-only key for this session"
         $secretPrefix = "`$env:SECRET_KEY = 'dev-only-secret-key-min-32-chars-a7f3e2c8b4d9f1e6'; "
     }
-    $bffCmd = "cd '$BackendDir'; $secretPrefix`$env:HEALTH_DOMAIN_MODE = 'postgres'; `$env:HEALTH_DOMAIN_URL = '$DomainUrl'; `$env:HEALTH_DOMAIN_TOKEN = '$DomainToken'; `$env:DATABASE_URL = 'sqlite:///./compass.db'; ..\.venv\Scripts\python.exe -m uvicorn main:app --reload"
+    # P0-8: the startup script must state the legacy-write posture EXPLICITLY
+    # (disabled) rather than relying on the code default.
+    $bffCmd = "cd '$BackendDir'; $secretPrefix`$env:HEALTH_DOMAIN_MODE = 'postgres'; `$env:HEALTH_DOMAIN_URL = '$DomainUrl'; `$env:HEALTH_DOMAIN_TOKEN = '$DomainToken'; `$env:HEALTH_LEGACY_WRITE_MODE = 'disabled'; `$env:DATABASE_URL = 'sqlite:///./compass.db'; ..\.venv\Scripts\python.exe -m uvicorn main:app --reload"
     Start-Process powershell -ArgumentList "-NoExit", "-Command", $bffCmd
     if (-not (Wait-Http "http://localhost:8000/healthz" $null "FastAPI BFF (:8000)")) {
         throw "FastAPI failed to start - check its window for errors."

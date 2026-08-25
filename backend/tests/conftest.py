@@ -59,10 +59,15 @@ def client(app):
 
 
 @pytest.fixture(autouse=True)
-def _reset_state():
+def _reset_state(monkeypatch):
     """Clear rate-limit counters and wipe DB rows between tests so each test
     starts from a known empty slate. Runs *after* the client fixture's
-    lifespan has created the tables on first use."""
+    lifespan has created the tables on first use.
+
+    P0-8: the production default for HEALTH_LEGACY_WRITE_MODE is now
+    `disabled`. Tests that exercise legacy routes directly opt back in here;
+    the gate tests override it per-test to prove both postures."""
+    monkeypatch.setenv("HEALTH_LEGACY_WRITE_MODE", "enabled")
     from services import rate_limit
     rate_limit.reset()
     yield

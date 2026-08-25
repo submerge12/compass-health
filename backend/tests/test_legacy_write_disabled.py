@@ -26,9 +26,10 @@ def _headers(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_mode_default_is_enabled(monkeypatch):
+def test_mode_default_is_disabled(monkeypatch):
+    # P0-8: production default is hard-off; `enabled` is opt-in only.
     monkeypatch.delenv("HEALTH_LEGACY_WRITE_MODE", raising=False)
-    assert legacy_write_mode() == "enabled"
+    assert legacy_write_mode() == "disabled"
 
 
 @pytest.mark.parametrize(

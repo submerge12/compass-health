@@ -182,6 +182,8 @@ const ConditionPage = {
       tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--text-3)">${I18n.t('common.no_data')}</td></tr>`;
       return;
     }
+    // P0-8: SQLite reads are a LEGACY ARCHIVE view — not current authority.
+    const archiveNote = `<tr><td colspan="5" style="text-align:center;color:var(--text-3);font-size:12px">⚠ 历史归档（旧数据库）— 非当前权威数据 / legacy archive</td></tr>`;
     const moods = ['😞','😐','🙂','😊','🤩'];
     tbody.innerHTML = [...history].reverse().slice(0, 7).map(r => `
       <tr>
@@ -190,7 +192,7 @@ const ConditionPage = {
         <td>${r.bp_systolic != null ? r.bp_systolic + '/' + r.bp_diastolic : '—'}</td>
         <td>${r.sleep_hours != null ? r.sleep_hours + ' h' : '—'}</td>
         <td>${r.mood != null ? moods[r.mood - 1] : '—'}</td>
-      </tr>`).join('');
+      </tr>`).join('') + archiveNote;
   },
 
   async _submit() {

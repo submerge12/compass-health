@@ -99,13 +99,15 @@ def _mock_asr_transport(transcript: str) -> httpx.MockTransport:
 
 def test_transcribe_route_returns_transcript_and_intent(auth_client, monkeypatch):
     import routers.voice_routes as routes
+    from pathlib import Path
 
+    fixture = Path(__file__).parent / "fixtures" / "voice" / "tone.webm"
     monkeypatch.setattr(routes, "_transcriber", lambda: MiMoStub("我今天卧推做了三组，每组八次"))
 
     res = auth_client["client"].post(
         "/api/voice/transcribe",
         headers={"Authorization": f"Bearer {auth_client['token']}"},
-        files={"audio": ("test.wav", b"RIFF....", "audio/wav")},
+        files={"audio": ("recording.webm", fixture.read_bytes(), "audio/webm")},
         data={"language": "zh"},
     )
     assert res.status_code == 200
@@ -128,15 +130,41 @@ class MiMoStub:
         return TranscriptionResult(text=self._text, provider_request_id="stub", model="mimo-v2.5-asr")
 
 
-def test_transcribe_rejects_bad_format(auth_client, monkeypatch):
-    import routers.voice_routes as routes
-    monkeypatch.setattr(routes, "_transcriber", lambda: MiMoStub("x"))
+def test_transcribe_rejects_bad_format(auth_client):
+    # Unrecognizable magic bytes are refused before ffmpeg is invoked.
     res = auth_client["client"].post(
         "/api/voice/transcribe",
         headers={"Authorization": f"Bearer {auth_client['token']}"},
-        files={"audio": ("test.ogg", b"data", "audio/ogg")},
+        files={"audio": ("junk.bin", b"not-audio-at-all", "application/octet-stream")},
     )
     assert res.status_code == 400
+
+
+def test_transcribe_accepts_real_webm_and_normalizes(auth_client, monkeypatch):
+    """WO-HS-08 acceptance: a genuine WebM/Opus recording is sniffed,
+    transcoded through ffmpeg, and transcribed - no .wav disguise needed."""
+    import routers.voice_routes as routes
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures" / "voice" / "tone.webm"
+    seen = {}
+
+    class RecordingStub(MiMoStub):
+        async def transcribe(self, audio_bytes: bytes, mime_type: str, language: str):
+            seen["mime"] = mime_type
+            seen["is_wav"] = audio_bytes[:4] == b"RIFF"
+            return await super().transcribe(audio_bytes, mime_type, language)
+
+    monkeypatch.setattr(routes, "_transcriber", lambda: RecordingStub("好的"))
+    res = auth_client["client"].post(
+        "/api/voice/transcribe",
+        headers={"Authorization": f"Bearer {auth_client['token']}"},
+        files={"audio": ("clip.webm", fixture.read_bytes(), "audio/webm")},
+        data={"language": "zh"},
+    )
+    assert res.status_code == 200, res.text
+    assert seen["mime"] == "audio/wav"
+    assert seen["is_wav"] is True  # normalized output is real PCM WAV
 
 
 def test_text_fallback_route(auth_client):

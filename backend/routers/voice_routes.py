@@ -10,6 +10,7 @@ default; logs carry ids and stage codes only, never audio or full transcripts.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 import os
 import uuid
 
@@ -18,19 +19,23 @@ from pydantic import BaseModel
 
 from auth import get_current_user
 from models import User
+from services.asr.audio_normalizer import (
+    MAX_UPLOAD_BYTES,
+    AudioNormalizeError,
+    detect_mime,
+    normalize_to_wav16k,
+)
 from services.asr.mimo import AsrUnavailableError, MiMoTranscriber, default_language
 from services.domain_identity import external_id_for_user
 from services.health_domain_client import DomainUnavailableError, HealthDomainClient
-from services.voice_intent import classify_intent
+from datetime import datetime
+
+from services.voice_dispatcher import DispatchError, dispatch
+from services.voice_intent import VoiceIntent, classify_intent
 
 logger = logging.getLogger("compass.voice")
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
-
-_MIME_BY_SUFFIX = {
-    ".wav": "audio/wav",
-    ".mp3": "audio/mpeg",
-}
 
 
 def _transcriber() -> MiMoTranscriber:
@@ -43,21 +48,22 @@ async def transcribe_audio(
     language: str = Form(""),
     user: User = Depends(get_current_user),
 ) -> dict:
-    suffix = "." + (audio.filename or "").rsplit(".", 1)[-1].lower()
-    mime = _MIME_BY_SUFFIX.get(suffix)
-    if mime is None:
-        raise HTTPException(status_code=400, detail="仅支持 wav / mp3 音频")
-
     data = await audio.read()
-    if len(data) > 7_500_000:
+    if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="音频过大（编码后上限约 10MB）")
 
+    # WO-HS-08: browsers lie about extensions (MediaRecorder -> webm named .wav).
+    # Sniff the real container, then normalize to 16k mono WAV server-side.
+    real_mime = detect_mime(data)
+    if real_mime is None:
+        raise HTTPException(status_code=400, detail="无法识别的音频格式（支持 webm/mp4/wav/mp3）")
+
     try:
+        normalized = await normalize_to_wav16k(data)
         result = await _transcriber().transcribe(
-            data, "audio/x-wav" if mime == "audio/wav" else mime,
-            language or default_language(),
+            normalized, "audio/wav", language or default_language(),
         )
-    except AsrUnavailableError as exc:
+    except AudioNormalizeError as exc:
         logger.warning("asr unavailable for user %s: %s", user.id, exc)
         raise HTTPException(
             status_code=503,
@@ -109,6 +115,7 @@ class VoiceCommitInput(BaseModel):
     idempotency_key: str = ""
     date: str = ""
     confirmed: bool = False
+    chosen_items: Optional[list[dict]] = None  # confirmed food candidates
 
 
 @router.post("/commit")
@@ -117,75 +124,49 @@ async def commit_voice_record(
     user: User = Depends(get_current_user),
     client: HealthDomainClient = Depends(lambda: HealthDomainClient()),
 ) -> dict:
-    """Commit a CONFIRMED record through the same domain commands as text/UI.
+    """Execute one CONFIRMED voice intent through the canonical domain commands.
 
-    Refuses to act on unknown intents and refuses plan modifications from this
-    simplified path (those go through the interactive plan UI with diffs).
+    Unknown intents refuse to write anything; plan modifications return a hint
+    to use the interactive UI (diff confirmation lives there).
     """
     intent = classify_intent(payload.transcript)
     if intent.category == "unknown":
         raise HTTPException(status_code=422, detail="无法识别的意图，未执行任何写入")
     if intent.needs_confirmation and not payload.confirmed:
         return {"status": "needs_confirmation", "intent": _intent_dict(intent)}
-    if intent.action == "log_meal" and intent.entities.get("food_description"):
-        description = intent.entities["food_description"]
-        downstream = await client.request(
-            "POST",
-            "/api/v1/diet/logs:commit",
-            external_user_id=external_id_for_user(user.id),
-            json_body={
-                "date": payload.date,
-                "mealType": _guess_meal_type(),
-                "description": description,
-                "idempotencyKey": payload.idempotency_key or f"voice:{uuid.uuid4().hex}",
-                "source": "voice",
-            },
-        )
-        body = downstream.json()
-        if downstream.status_code >= 400 or body.get("error"):
-            logger.info("voice meal commit rejected code=%s", body.get("error"))
-            return {"status": "rejected", "domain_response": body}
-        if body.get("status") == "needs_confirmation":
-            # Domain refused an unresolved description (M05): surface candidates.
-            return {"status": "needs_confirmation",
-                    "needs_confirmation": body.get("needsConfirmation"),
-                    "unmatched": body.get("unmatched")}
-        log = body.get("log") or {}
-        if not log.get("id"):
-            return {"status": "rejected", "domain_response": body}
-        return {"status": "committed", "log_id": log.get("id"), "kcal": log.get("caloriesKcal")}
-    if intent.action == "report_pain":
-        observed_on = payload.date
-        downstream = await client.request(
-            "POST",
-            "/api/v1/observations",
-            external_user_id=external_id_for_user(user.id),
-            json_body={
-                "observedOn": observed_on,
-                "kind": "pain",
-                "valueJson": {"bodyPart": intent.entities.get("body_part"), "transcript": payload.transcript},
-            },
-        )
-        if downstream.status_code >= 400:
-            return {"status": "rejected", "domain_response": downstream.json()}
-        return {"status": "committed", "observation_event_id": downstream.json().get("eventId")}
 
-    # Training sets / cardio / modifications need the richer session flow.
+    key = payload.idempotency_key or f"voice:{uuid.uuid4().hex}"
+    date = payload.date or datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        result = await dispatch(
+            intent,
+            user_id=user.id,
+            token_actor="voice",
+            date=date,
+            idempotency_key=key,
+            client=client,
+            chosen_items=getattr(payload, "chosen_items", None),
+        )
+        logger.info("voice dispatch ok user=%s action=%s", user.id, intent.action)
+        return result
+    except DispatchError as exc:
+        if exc.status >= 500:
+            logger.warning("voice dispatch domain failure user=%s: %s", user.id, exc.code)
+        raise HTTPException(
+            status_code=exc.status,
+            detail={"error": exc.code, "message": str(exc)},
+        ) from exc
+
+
+def _intent_dict(intent) -> dict:
     return {
-        "status": "unsupported_here",
-        "hint": "该意图请使用对应页面：训练逐组记录或计划调整界面",
-        "intent": _intent_dict(intent),
+        "category": intent.category,
+        "action": intent.action,
+        "confidence": intent.confidence,
+        "entities": intent.entities,
+        "needs_confirmation": intent.needs_confirmation,
+        "reply_hint_zh": intent.reply_hint_zh,
     }
 
 
-def _guess_meal_type() -> str:
-    from datetime import datetime
-
-    hour = datetime.now().hour
-    if 5 <= hour < 11:
-        return "breakfast"
-    if 11 <= hour < 15:
-        return "lunch"
-    if 15 <= hour < 18:
-        return "snack"
-    return "dinner"
